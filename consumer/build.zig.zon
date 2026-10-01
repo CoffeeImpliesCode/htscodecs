@@ -1,0 +1,23 @@
+.{
+    .name = .htscodecs_consumer,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+
+    // Suggested by the pinned compiler for this package name.
+    .fingerprint = 0xedf8509856ca3c03,
+
+    .dependencies = .{
+        // A real package dependency on the fork, resolved from the parent
+        // directory.  Nothing here reaches into the fork's source tree by
+        // hand: the consumer only ever sees dep.module("htscodecs").
+        .htscodecs = .{
+            .path = "..",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

@@ -45,3 +45,11 @@ tests/test.out/
 tests/tokenise_name3
 tests/tokenise_name3_fuzz
 tests/varint
+
+# Zig build outputs.  Appended by the Zig packaging; every upstream entry
+# above is preserved unchanged.  These are the two directories `zig build`
+# creates by default in Zig 0.16.  The patterns carry no leading slash, so
+# they also cover consumer/, which is a package in its own right.  An
+# operator who redirects the cache with --cache-dir owns that path.
+.zig-cache/
+zig-out/

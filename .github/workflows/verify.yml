@@ -1,0 +1,183 @@
+# Verification for this fork's Zig build.
+#
+# Replaces the upstream autotools workflow, which drove the build on the
+# upstream maintainer's infrastructure.  Nothing here touches anything but
+# this repository.
+#
+# What is verified:
+#   * the vendored C library builds offline from this tree
+#   * the behavioural tests pass in Debug and ReleaseSafe, and again with the
+#     arithmetic coder's bzip2 method compiled in
+#   * the example runs once and checks its own results
+#   * the consumer package builds and runs through b.dependency()
+#   * the facade, the tests and the example compile for the cross-target
+#     matrix without running anything
+#   * the licence and provenance records are present, the pinned upstream
+#     commit is still reachable in this clone's history, and no upstream C
+#     source, header, test, script or licence file has been edited
+#   * a copy of the tree with no .git builds anyway, and the history gate
+#     refuses to report success there
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+name: verify
+
+on:
+  push:
+  pull_request:
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  native:
+    name: native build, tests, smoke, consumer
+    runs-on: ubuntu-latest
+    steps:
+      # A shallow checkout on purpose: nothing in this job reads git history.
+      # `provenance-history` is the only step that needs the full clone, and
+      # it lives in the provenance job.
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install libbz2 development files
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libbz2-dev
+
+      - name: Build
+        run: zig build --summary all
+
+      - name: Test (Debug)
+        run: zig build test --summary all
+
+      - name: Test (ReleaseSafe)
+        run: zig build test -Doptimize=ReleaseSafe --summary all
+
+      # The example compares itself against upstream's own compressed
+      # fixtures and exits non-zero on any disagreement, so its exit code is
+      # the semantic check.  It runs once here: grepping its prose a second
+      # time would test the wording of the report, not the library.
+      - name: Smoke
+        run: zig build smoke --summary all
+
+      - name: Consumer package
+        working-directory: consumer
+        run: zig build run --summary all
+
+      - name: bzip2 build
+        run: zig build test -Dbz2=true --summary all
+
+  cross:
+    name: cross-target check
+    runs-on: ubuntu-latest
+    steps:
+      # Shallow: compiling for six targets reads no history.
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # Compiles the C core, the translated interface, every public facade
+      # method, the tests and the example for each target in the default
+      # matrix.  Nothing is executed: the tests are emitted as objects and
+      # the examples are compiled but never run.
+      #
+      # The matrix includes aarch64-macos-none.  In Zig 0.16 `Abi.default`
+      # maps .macos to .none, so that spelling is the ordinary macOS ABI,
+      # not a libc-less one, and the build script does not pre-judge it.
+      # Whether a GitHub Linux runner can satisfy that target's
+      # prerequisites is left for this step to report; the build script
+      # must not decide it in advance.  See FORK-NOTES.md entry 11.
+      - name: Check
+        run: zig build check --summary all
+
+  provenance:
+    name: licence and provenance
+    runs-on: ubuntu-latest
+    steps:
+      # This job is the only one that reads git history: `provenance-history`
+      # runs `git cat-file -e <pinned commit>^{commit}`, and the pristine-diff
+      # step below compares the tree against that same commit.  Both need the
+      # full clone, so it is asked for here and nowhere else.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Provenance gate
+        run: zig build provenance --summary all
+
+      # History is a property of a clone, not of the sources, so it is a
+      # separate step: a source package without .git still builds, and this
+      # step is where the clone is required to carry the pinned commit.
+      - name: Pinned upstream commit is in the history
+        run: zig build provenance-history --summary all
+
+      # The gate checks presence; this checks that the records still say what
+      # they said when the pin was taken.
+      - name: Records match the pin
+        run: |
+          set -eu
+          test -f LICENSE.md
+          test -f NOTICE.md
+          test -f UPSTREAM.md
+          test -f CHANGELOG.md
+          test -f FORK-NOTES.md
+          grep -q 'b9fc194f772e45bb0a1f44b08cbf8697a1384bae' UPSTREAM.md
+          grep -q 'b9fc194f772e45bb0a1f44b08cbf8697a1384bae' build.zig
+          # The three upstream licence exceptions must each be named here:
+          # upstream ships them as public domain, two under a CC0 waiver.
+          for f in c_range_coder.h rANS_byte.h rANS_word.h; do
+            grep -q "$f" NOTICE.md
+          done
+
+      # No upstream C source or header may be edited.  .gitignore is the one
+      # file this fork appends to (CHANGELOG entry 8), so it is not in this
+      # list; the append is recorded in UPSTREAM.md and NOTICE.md rather than
+      # diffed byte for byte, because a gate that compares this fork's own
+      # bookkeeping with itself catches a reworded comment, not a lost
+      # upstream file.  Every other upstream path below stays checked.
+      - name: Upstream sources are unmodified
+        run: |
+          set -eu
+          if ! git cat-file -e b9fc194f772e45bb0a1f44b08cbf8697a1384bae^{commit}; then
+            echo "pinned upstream commit is missing from the history" >&2
+            exit 1
+          fi
+          changed=$(git diff --name-only b9fc194f772e45bb0a1f44b08cbf8697a1384bae -- \
+            htscodecs tests javascript m4 \
+            configure.ac Makefile.am LICENSE.md NEWS.md README.md BENCHMARKS.md \
+            MAINTAINERS.md .gitattributes)
+          if [ -n "$changed" ]; then
+            echo "upstream files were modified:" >&2
+            echo "$changed" >&2
+            exit 1
+          fi
+
+      # The build must not need git.  A release tarball, a vendored copy or a
+      # distribution's source tree has no .git, and every gate except the
+      # history one is supposed to hold there.  Copy the tree without .git and
+      # demonstrate both halves: the ordinary build succeeds, and the history
+      # gate refuses to report a success it did not observe.
+      - name: A source package without .git still builds
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          tar --exclude=./.git --exclude=./.zig-cache --exclude=./zig-out \
+            -cf - . | tar -xf - -C "$tmp"
+          cd "$tmp"
+          zig build --summary all
+          if zig build provenance-history > filtered-history.log 2>&1; then
+            echo "provenance-history reported success with no .git present" >&2
+            cat filtered-history.log >&2
+            exit 1
+          fi
+          echo "provenance-history refused, as documented"
+

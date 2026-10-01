@@ -1,0 +1,36 @@
+.{
+    .name = .htscodecs,
+    .version = "1.6.7",
+    .minimum_zig_version = "0.16.0",
+
+    // The pinned Zig 0.16.0 toolchain rejected the value this file carried
+    // first and named this one for this package.  Keep it verbatim: the
+    // fingerprint identifies the package, so it belongs to this manifest
+    // only and must not be copied from another package or from a
+    // `zig init --minimal` placeholder.
+    .fingerprint = 0x1cae8edb6408e4ce,
+
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "root.zig",
+        "fixtures.zig",
+        "src",
+        "include",
+        "test",
+        "examples",
+        "consumer",
+        "htscodecs",
+        "tests",
+        "LICENSE.md",
+        "NEWS.md",
+        "README.md",
+        "README.zig.md",
+        "UPSTREAM.md",
+        "CHANGELOG.md",
+        "NOTICE.md",
+        "FORK-NOTES.md",
+    },
+}
