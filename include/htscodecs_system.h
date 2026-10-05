@@ -37,6 +37,15 @@
 #ifndef HTSCODECS_SYSTEM_H
 #define HTSCODECS_SYSTEM_H
 
+/*
+ * The standard types the upstream public headers use but do not include:
+ * pack.h, rle.h, tokenise_name3.h and the rest have no `#include` line at
+ * all, so the aggregate has to establish them.  See the longer note in
+ * include/htscodecs_all.h, which discharges the same assumption.
+ */
+#include <stdint.h>
+#include <stddef.h>
+
 #include <htscodecs/htscodecs.h>
 
 #include <htscodecs/pack.h>

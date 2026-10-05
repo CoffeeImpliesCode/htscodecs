@@ -1,9 +1,42 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Idiomatic Zig facade over the upstream htscodecs C library.
 //!
 //! This file adds no algorithms.  Every function is a thin, audited wrapper
 //! around the matching entry point in the `c` module (the translation of
 //! include/htscodecs_all.h), and the raw C surface stays reachable through
 //! `htscodecs.c` for anything the facade does not cover.
+//!
+//! ## The shortest useful sequence
+//!
+//! Compress into a buffer you own, size the decode destination exactly,
+//! and release whatever upstream allocated.
+//!
+//! ```zig
+//! const htscodecs = @import("htscodecs");
+//!
+//! const payload = "the quick brown fox jumps over the lazy dog" ** 8;
+//!
+//! // Caller buffers.  Nothing is allocated by the library on this path.
+//! const bound = try htscodecs.rans4x16.compressBound(payload.len, 0);
+//! const scratch = try allocator.alloc(u8, bound);
+//! defer allocator.free(scratch);
+//! const n = try htscodecs.rans4x16.compressTo(payload, scratch, 0);
+//!
+//! // Size the decode destination to the payload, not to a round number.
+//! // A STRIPE stream is rejected outright if the destination is *larger*
+//! // than the original, not merely if it is smaller.
+//! const plain = try allocator.alloc(u8, payload.len);
+//! defer allocator.free(plain);
+//! const m = try htscodecs.rans4x16.uncompressTo(scratch[0..n], plain);
+//! assert(std.mem.eql(u8, plain[0..m], payload));
+//!
+//! // Where upstream has no caller-buffer form the result is an `Owned`:
+//! // one malloced block, one `deinit`, and never both a copy of the
+//! // handle and its original released.
+//! const packed = try htscodecs.rans4x8.compress(payload, 0);
+//! defer packed.deinit();   // std.c.free, the allocator that produced it
+//! use packed.slice();
+//! ```
 //!
 //! Three rules shape the wrappers:
 //!
@@ -13,21 +46,46 @@
 //!    `malloc`ing entry point, the wrapper returns an `Owned` that wraps the
 //!    C pointer and frees it with the C allocator in `deinit`.  No Zig
 //!    allocator is involved and no process-global hook is installed.
-//! 2. Length narrowing is checked.  Upstream takes `unsigned int` and
-//!    rejects anything above `INT_MAX`; the wrappers return
-//!    `error.LengthOverflow` before the call instead of truncating.
-//! 3. Aliasing is rejected, in every build mode.  Upstream reads one region
-//!    while writing another, so they must not overlap; a wrapper that finds
-//!    them overlapping returns `error.InvalidArgument` before the call,
-//!    rather than let the result depend on the order the C code happens to
-//!    touch the bytes.  The check is an ordinary comparison, so a
-//!    ReleaseFast build refuses it too.
+//! 2. A length upstream's own prototype would truncate is refused with
+//!    `error.LengthOverflow` before the call.  Upstream is inconsistent
+//!    here: some entry points take `unsigned int` or `int` and reject
+//!    anything above `INT_MAX`, others take `uint64_t`, where a `usize`
+//!    length widens and cannot lose a value.  A wrapper narrows only where
+//!    narrowing can happen.
+//! 3. Aliasing is refused exactly where upstream reads one region while
+//!    writing another.  Each wrapper names the pair it checks; a wrapper
+//!    with a single caller buffer has nothing to check.  The check is an
+//!    ordinary comparison, so the refusal is a published error in every
+//!    build mode rather than a debug assertion a release build drops.
 //!
 //! Upstream reports failure as a NULL return, and does not distinguish
 //! "the stream is invalid" from "allocation failed" (or, for the encoding
 //! side, from "your buffer is too small").  The wrappers cannot recover
 //! information upstream threw away, so they map NULL as documented on each
 //! function rather than inventing a distinction.
+//!
+//! ## Two configurations, one typed surface
+//!
+//! Everything above is written once against the `c` module, and `c` is
+//! either the translated header or a generated dispatch that resolves the
+//! same names through a table.  In a linked build every call below is a
+//! direct call with no table and no readiness check.  In a runtime-loading
+//! build (`-Druntime=true`) the same calls go through the table that
+//! `htscodecs.load` fills, and a call before a successful load stops the
+//! program naming the function.  `htscodecs.runtime_loaded` says which
+//! configuration this build is, at comptime.
+//!
+//! Two consequences are worth knowing before using the runtime route:
+//!
+//!   * `Owned` is still freed with the C allocator in both configurations.
+//!     Upstream's `malloc`-ing entry points allocate with libc `malloc`
+//!     (`rANS_static.c:77`, `rANS_static4x16pr.c:1040`), not with
+//!     `htscodecs_tls_alloc`, so `std.c.free` is the pairing - and it stays
+//!     the pairing for a provider loaded into this process.
+//!   * `tls` below is the library's *own* pool, a different family with a
+//!     different pairing: what `tls.alloc` returns is released with
+//!     `tls.free`, never with libc `free`.  Use it for scratch memory you
+//!     want the provider to hold; use `Owned` for a compressed result.
 
 const std = @import("std");
 
@@ -47,25 +105,36 @@ pub const c = @import("c");
 /// `OperationFailed` and nothing more specific.  Only an argument the
 /// facade inspects itself, before calling, earns a name of its own.
 pub const Error = error{
-    /// A length does not fit the `unsigned int` / `int` size upstream uses.
-    /// Upstream rejects inputs above `INT_MAX` too; refusing here keeps
-    /// that a length problem rather than an unexplained NULL.
+    /// A caller length does not fit the narrower type upstream's prototype
+    /// takes for it, so passing it on would truncate or wrap.  Upstream's
+    /// own entry points refuse the same inputs
+    /// (`rANS_static4x16pr.c:1206`, `arith_dynamic.c:736`,
+    /// `rANS_static.c:831`, `fqzcomp_qual.c:1617`), so naming the bound here
+    /// keeps the outcome a length problem rather than an unexplained NULL.
+    /// Only the wrappers that actually narrow raise it; where the C
+    /// parameter is `uint64_t` a `usize` length widens and there is nothing
+    /// to lose.  A count is a length here too: `Slice.num_records` reaches
+    /// upstream as an `int`, so it is refused above `max_stream_len`
+    /// rather than truncated.
     LengthOverflow,
 
     /// The facade rejected the argument itself, before calling upstream:
-    /// an order byte the chosen kernel does not implement, a record array
-    /// whose length contradicts `Slice.num_records`, a symbol map shorter
-    /// than the 256 bytes the C code reads and writes, an `rle.Symbols`
-    /// count outside the 256-entry array, or an input and an output that
-    /// overlap.  Fixing the argument is the whole remedy.
+    /// an order byte the chosen kernel does not implement, a negative
+    /// fqzcomp strategy, a record array whose length contradicts
+    /// `Slice.num_records`, a symbol map shorter than the 256 bytes the C
+    /// code reads and writes, an `rle.Symbols`
+    /// count outside the 256-entry array, or the input/output pair a
+    /// particular wrapper names as unsafe to overlap.  Fixing the argument
+    /// is the whole remedy; nothing upstream ran.
     InvalidArgument,
 
     /// The facade compared two lengths the caller supplied and knows the
     /// destination cannot hold the result: a zero-length destination, a
     /// `rle.encode` whose `run` or `out` is smaller than the size that
-    /// call documents as required, or a stream that `pack.unpackTo` would
-    /// copy past its destination.  This is the only error a caller can act
-    /// on by resizing and retrying.
+    /// call documents as required, an `fqzcomp.decompressLengths` with no
+    /// room at all for the record lengths, or a stream that
+    /// `pack.unpackTo` would copy past its destination.  This is the only
+    /// error a caller can act on by resizing and retrying.
     BufferTooSmall,
 
     /// Upstream returned NULL, and the C API does not say why.  Depending
@@ -74,36 +143,90 @@ pub const Error = error{
     /// coder's `ext` without `-Dbz2=true`), or an allocation failed.  None
     /// of those is distinguishable from the others through `htscodecs.c`,
     /// so this says only what is true: the operation did not succeed.
-    /// Read the doc on the function that produced it for what its own NULL
-    /// can mean.
+    /// Nothing about the cause can be recovered from it, and the out
+    /// parameters the C function had already written are not reported
+    /// either - read the doc on the function for what its own NULL leaves
+    /// behind.
     OperationFailed,
+
+    /// The library's own thread-local pool returned NULL for this request.
+    ///
+    /// The one error here that names its own cause rather than reporting a
+    /// NULL whose reason upstream threw away: `htscodecs_tls_alloc` and
+    /// `htscodecs_tls_calloc` do nothing but allocate
+    /// (`htscodecs/utils.c:119`-`:181`), so a NULL from either means the
+    /// pool had nothing to give.
+    AllocationFailed,
 };
 
-/// Upstream's own hard ceiling.  Every `*_size` argument is an
-/// `unsigned int`, and the encoders explicitly test `in_size > INT_MAX`.
+/// The ceiling this facade uses wherever it has to narrow a caller length
+/// to upstream's `unsigned int` or `int`: `INT_MAX`, above which those
+/// parameters would be rejected or would wrap.  Upstream's encoders test
+/// the same bound themselves, so refusing here keeps the outcome a length
+/// problem instead of an unexplained NULL.
+///
+/// It is *not* a limit on every buffer in the library.  `rle.encode` and
+/// `rle.decode` hand upstream `uint64_t` lengths that a `usize` widens
+/// into without loss (`rle.c:100`-`:103`, `:142`-`:145`), and
+/// `pack.unpackMeta` accepts up to `std.math.maxInt(u32)`.  Each wrapper
+/// documents what it accepts, and a wrapper that narrows one length and
+/// not another says which is which.
 pub const max_stream_len: usize = std.math.maxInt(c_int);
 
 // ---------------------------------------------------------------------------
 // Owned results
 // ---------------------------------------------------------------------------
 
-/// A buffer that upstream allocated with `malloc` and that the caller owns.
+/// A buffer upstream allocated with `malloc`, owned by the caller.
 ///
-/// `slice` is a window on that allocation and `deinit` releases it, so the
-/// two together account for every byte: there is no second buffer to
-/// free.  `deinit` calls the C allocator's `free`, which is the correct
-/// pairing for upstream's `malloc`.  Nothing here touches a Zig allocator,
-/// so an `Owned` may be produced in one context and released in another.
+/// This is a single-owner handle to one block, and it is the only thing the
+/// facade hands back that has to be released.  `slice` is a window on that
+/// block and `deinit` frees it, so there is no second thing to free and no
+/// Zig allocator anywhere in the path.
+///
+/// * **Valid state.**  Only the functions that return an `Owned` can produce
+///   a meaningful one.  `ptr` and `len` are reachable and mutable and the
+///   facade does not police them: a `len` wider than the block turns
+///   `slice` into an out-of-bounds read, and a `ptr` from somewhere else
+///   turns `deinit` into the wrong free.
+/// * **One owner, one release.**  An `Owned` owns its block outright.
+///   Copying the struct copies the pointer and the length and nothing else,
+///   so both copies refer to the same allocation and `deinit` on either
+///   frees it.  Release it exactly once, on one copy, and never on a second
+///   copy of the same value - that is a double free.  `deinit` is not
+///   idempotent and nothing here makes it so.
+/// * **Move it, do not share it.**  To hand an `Owned` on, pass the value
+///   and stop using your own copy.  `deinit` takes `self` by value, which
+///   is what makes `defer encoded.deinit()` correct: the caller's own
+///   variable is still there afterwards and its pointer dangles.
+/// * **Releaser.**  `std.c.free`, the correct pairing for upstream's
+///   `malloc`.  No Zig allocator is involved and no process-global
+///   allocator hook is installed, so `std.testing.allocator` cannot see
+///   these bytes: a leak oracle over Zig allocations does not cover them.
+///   An `Owned` may be produced in one context and released in another.
+/// * **What `len` means.**  The length upstream reported as used.  The
+///   allocation may be larger; the bytes past `len` are not part of the
+///   result.
 pub const Owned = struct {
+    /// Start of the malloced block.  Owned by this value; see the type doc
+    /// before overwriting it.
     ptr: [*]u8,
+
+    /// How many bytes are the result.  This is not the size of the block.
     len: usize,
 
-    /// The owned bytes.  Valid until `deinit`.
+    /// The owned bytes, valid until `deinit`.  A window, not a copy: it
+    /// aliases the block, so writes through it change the owned bytes, and
+    /// it dangles the moment `deinit` runs.  Do not retain it past the
+    /// release.
     pub fn slice(self: Owned) []u8 {
         return self.ptr[0..self.len];
     }
 
-    /// Releases the buffer with the C allocator that produced it.
+    /// Releases the block with the C allocator that produced it, and
+    /// leaves the caller's copy of `self` pointing at freed memory.  Call
+    /// this once; calling it again on the same value, or on any copy of
+    /// it, is a double free.
     pub fn deinit(self: Owned) void {
         cFree(self.ptr);
     }
@@ -115,6 +238,68 @@ pub const Owned = struct {
 pub fn cFree(ptr: ?[*]u8) void {
     if (ptr) |p| std.c.free(@ptrCast(p));
 }
+
+// ---------------------------------------------------------------------------
+// The library's own allocation pool  (utils.c)
+// ---------------------------------------------------------------------------
+
+/// `htscodecs`'s thread-local allocation pool, exported from `utils.c` and
+/// declared by `utils.h:63`-`:65`.
+///
+/// **This is a different family from `Owned` and the pairing is not
+/// interchangeable.**  What `alloc` and `calloc` return is released with
+/// `free` *here* - `htscodecs_tls_free` - and never with libc `free`; and
+/// what libc `free` receives, from `Owned.deinit`, must never be passed to
+/// this.  Upstream keeps the two apart: the compressing entry points
+/// allocate with plain `malloc` (`rANS_static.c:77`,
+/// `rANS_static4x16pr.c:1040`, `arith_dynamic.c:100`), while this pool is
+/// what the frequency tables and per-record scratch come from
+/// (`fqzcomp_qual.c:323`, `utils.h:146`).
+///
+/// What the pool is depends on how the library was built.  With threads
+/// (`utils.c:119`-`:208`) it keeps a small per-thread cache behind a
+/// `pthread_key`. Allocate and free each pointer on the same thread: freeing
+/// on another thread that has no pool dereferences null in upstream, and a
+/// different pool cannot reclaim the allocation. Without threads -
+/// `include/htscodecs_config.h:99`-`:103` sets `NO_THREADS` for `__wasi__` -
+/// the three functions are plain `calloc`/`free` (`utils.c:223`-`:233`).
+/// Nothing here allocates from a Zig allocator or installs a process-global hook,
+/// so `std.testing.allocator` cannot see these bytes: a leak oracle over
+/// Zig allocations does not cover them.
+pub const tls = struct {
+    /// `size` bytes from the pool, or `error.AllocationFailed`.
+    ///
+    /// Contents are unspecified. Fresh allocations are zeroed, but the
+    /// threaded reuse path returns the previous contents (`utils.c:141-162`).
+    pub fn alloc(size: usize) Error![*]u8 {
+        return tlsBlock(c.htscodecs_tls_alloc(size));
+    }
+
+    /// `nmemb * size` zeroed bytes from the pool, or
+    /// `error.AllocationFailed`.
+    ///
+    /// Caller precondition: `nmemb * size` fits in `usize`. The C library
+    /// multiplies without an overflow check (`utils.c:173-181`); this thin
+    /// wrapper does not turn a wrapped product into an allocation failure.
+    pub fn calloc(nmemb: usize, size: usize) Error![*]u8 {
+        return tlsBlock(c.htscodecs_tls_calloc(nmemb, size));
+    }
+
+    /// Releases a pointer from `alloc` or `calloc`.  Null is accepted and
+    /// does nothing, which is upstream's own behaviour.
+    /// In a threaded build, call on the same thread that allocated it.
+    ///
+    /// This is not `cFree`.  A pointer from `Owned.deinit` must go to libc
+    /// `free` and must never reach here.
+    pub fn free(ptr: ?[*]u8) void {
+        c.htscodecs_tls_free(@ptrCast(ptr));
+    }
+
+    fn tlsBlock(raw: ?*anyopaque) Error![*]u8 {
+        const block = raw orelse return error.AllocationFailed;
+        return @ptrCast(block);
+    }
+};
 
 /// Narrows a slice length to upstream's `unsigned int`, refusing anything
 /// upstream itself would reject.
@@ -192,6 +377,14 @@ inline fn cMap(map: []const u8) [*c]u8 {
 /// The smallest symbol map any of these entry points will touch.
 const min_map_len = 256;
 
+/// The number of entries in `rle.Symbols.syms`, and so the largest symbol
+/// count either rle direction accepts.  Upstream indexes that array with
+/// the caller's own count and no bound of its own - `rle.c:112-114`
+/// encodes, `rle.c:155-156` decodes - so anything outside 0..256 is a
+/// facade question, not one to hand to C.  Same value as `min_map_len`,
+/// different meaning: this one bounds a count, that one a length.
+const max_rle_symbols = 256;
+
 /// Produces the `unsigned char *` for a caller-owned destination buffer.
 inline fn cOutBuf(buf: []u8) [*c]u8 {
     return @ptrCast(buf.ptr);
@@ -211,7 +404,7 @@ fn overlaps(a: []const u8, b: []const u8) bool {
     return a0 < b0 + b.len and b0 < a0 + a.len;
 }
 
-/// The aliasing guard the `*_to` wrappers need.  Upstream reads one region
+/// The aliasing guard for a `[]u8` destination.  Upstream reads one region
 /// while writing another, so overlapping buffers make the result depend on
 /// the order the C code happens to touch the bytes.  This is an ordinary
 /// comparison that returns `error.InvalidArgument` before the call in
@@ -219,6 +412,11 @@ fn overlaps(a: []const u8, b: []const u8) bool {
 /// public contract is that error and not a debug assertion: a guard that
 /// vanishes in a release build would document a promise the library stops
 /// keeping exactly where a caller is least able to notice.
+///
+/// It is used only where the read and the write really do reach the same
+/// call.  Each wrapper that calls it says which pair it refuses; two
+/// read-only buffers that merely happen to be adjacent, or that the caller
+/// is free to share, are not its business.
 inline fn checkDisjoint(in: []const u8, out: []u8) Error!void {
     if (overlaps(in, out)) return error.InvalidArgument;
 }
@@ -385,18 +583,23 @@ pub const rans4x16 = struct {
     }
 
     /// Decompresses into `out`, which must not overlap `compressed`, and
-    /// returns the number of bytes written.
+    /// returns the number of bytes written.  The overlap refusal is an
+    /// ordinary comparison that runs before the call in every build mode.
     ///
     /// For a stream carrying the `stripe` order bit the destination must be
     /// exactly the original size.  `rANS_static4x16pr.c:1619` compares the
     /// length it read from the stream against the capacity for *equality*
     /// (`if (ulen != *out_size) return NULL;`), so an over-sized buffer is
     /// rejected exactly as a short one is and surfaces as
-    /// `error.OperationFailed`.  Every other order accepts a larger destination.
+    /// `error.OperationFailed`.  Every other order accepts a larger
+    /// destination.
     ///
     /// In the non-stripe path a short destination is reported the same way:
     /// upstream returns NULL without writing the size it needed, so the two
-    /// cases cannot be told apart.
+    /// cases cannot be told apart.  A destination of exactly
+    /// `max_stream_len` bytes is refused by upstream itself
+    /// (`rANS_static4x16pr.c:218`), so the practical ceiling is one byte
+    /// below it.
     pub fn uncompressTo(compressed: []const u8, out: []u8) Error!usize {
         // The length is narrowed first, before anything looks at the
         // buffers.  An input too long for upstream's own argument type is a
@@ -459,6 +662,19 @@ pub const rans32x16 = struct {
 
     /// `out` must already be the exact uncompressed size: the 32x16 streams
     /// do not store it.  Returns `out.len` on success.
+    ///
+    /// `order` is 0 or 1, as on `compressTo`.  The two lengths are bounded
+    /// before the call, and the bounds are not the same.  `compressed.len`
+    /// reaches upstream as its `unsigned int in_size`, so a slice longer
+    /// than `max_stream_len` is `error.LengthOverflow`; a slice of exactly
+    /// `max_stream_len` is passed on.  `out` does not: upstream takes the
+    /// caller's capacity directly (`unsigned int out_sz`) and refuses
+    /// `out_sz >= INT_MAX` itself (`rANS_static32x16pr.c:261` for order 0,
+    /// `:534` for order 1), so the facade names the ceiling
+    /// `error.LengthOverflow` rather than forwarding a call that can only
+    /// come back NULL.  A destination of exactly `max_stream_len` bytes is
+    /// refused before the call, and the practical ceiling is one byte below
+    /// it.  A destination of zero bytes is `error.BufferTooSmall`.
     pub fn uncompressTo(compressed: []const u8, out: []u8, order: c_int) Error!usize {
         if (order != 0 and order != 1) return error.InvalidArgument;
         const in_len = try narrow(compressed.len);
@@ -547,14 +763,21 @@ pub const arith = struct {
     }
 
     /// Decompresses into `out`, which must not overlap `compressed`, and
-    /// returns the number of bytes written.
+    /// returns the number of bytes written.  The overlap refusal is an
+    /// ordinary comparison that runs before the call in every build mode.
     ///
     /// For a stream carrying the `stripe` order bit the destination must be
-    /// exactly the original size: `arith_dynamic.c` compares the length it
-    /// read from the stream against the capacity for equality
+    /// exactly the original size: `arith_dynamic.c:1063` compares the length
+    /// it read from the stream against the capacity for equality
     /// (`if (ulen != *out_size) return NULL;`), so an over-sized buffer is
-    /// rejected just as a short one is.  For every other order a larger
-    /// destination is fine.
+    /// rejected just as a short one is, and the answer is
+    /// `error.OperationFailed`.  For every other order a larger destination
+    /// is fine.
+    ///
+    /// The non-stripe path reports a short destination the same way -
+    /// `arith_dynamic.c:1153` returns NULL without writing the size it
+    /// needed - and refuses a destination of exactly `max_stream_len` bytes
+    /// at `:1136`, so the practical ceiling is one byte below it.
     pub fn uncompressTo(compressed: []const u8, out: []u8) Error!usize {
         const in_len = try narrow(compressed.len);
         try checkDisjoint(compressed, out);
@@ -580,16 +803,33 @@ pub const arith = struct {
 /// string and its flags.  `flags` carries `fqzcomp.flag_read2` and, in bit
 /// 16 and up, the parameter selector the codec borrows from it.
 ///
-/// The borrows are mutable because the codec writes to them.  It clamps
-/// `len` so the records sum to the input length
+/// `fqzcomp.compress` borrows these arrays and never takes ownership:
+/// nothing here is freed by the facade and both must outlive the call.
+/// They are borrowed *mutably* because the codec writes to them.  It
+/// clamps `len` so the records sum to the input length
 /// (`fqzcomp_qual.c:790`, `:795`) and ORs its chosen selector into `flags`
 /// (`:589`, `:596`); before a successful `fqzcomp.compress` returns it
 /// clears those borrowed bits again (`:1219`-`:1221`).  So after a
 /// successful call `len` holds the clamped lengths and `flags` holds the
 /// bits the caller passed, which is what the codec actually used.
+///
+/// * **Valid state.**  `num_records` must be 1 or more, `len` exactly
+///   `num_records` long and `flags` at least that long; anything else is
+///   `error.InvalidArgument`, because upstream indexes both arrays by
+///   `num_records` with no bound of its own (`fqzcomp_qual.c:587`, `:417`).
+/// * **No overlap guard.**  Nothing compares these arrays against `in` or
+///   against each other.  Give each one its own storage.
 pub const Slice = struct {
+    /// How many records `len` and `flags` describe.  Upstream's field is an
+    /// `int`, so a `usize` above `max_stream_len` is refused rather than
+    /// truncated.
     num_records: usize,
+
+    /// Quality-string length per record.  Borrowed, and mutated in place.
     len: []u32,
+
+    /// Per-record flags.  Borrowed, and mutated in place.  Upstream reads
+    /// only the first `num_records` entries, so a longer array is fine.
     flags: []u32,
 };
 
@@ -601,14 +841,14 @@ pub const fqzcomp = struct {
     pub const flag_reverse: u32 = 16;
     /// Current on-disk format version.
     pub const format_version: c_int = c.FQZ_VERS;
-    /// Highest valid compression strategy.
+    /// Upstream's advertised maximum preset, not its strategy-table bound.
     pub const max_strategy: c_int = c.FQZ_MAX_STRAT;
     /// The CRAM version whose streams store qualities in the opposite
     /// orientation, so the encoder reverses each flagged record before
     /// encoding it and the decoder reverses it back: upstream gates that
     /// on `vers == 3` (`fqzcomp_qual.c:763`) and names the two values
     /// "CRAM version 4.0 (4) or 3.1 (3)" in its own test driver
-    /// (`fqzcomp_qual_test.c:322`).
+    /// (`tests/fqzcomp_qual_test.c:322`).
     pub const vers_3_1: c_int = 3;
     /// CRAM 4.0 stream; see `vers_3_1` for the citation.  A stream this
     /// version writes leaves the caller's quality bytes alone.
@@ -649,19 +889,32 @@ pub const fqzcomp = struct {
     /// `char *in` is non-const for exactly this reason, and the two
     /// outcomes are not distinguishable from the error the call returns.
     ///
-    /// `strat` selects the parameter search (0 to `max_strategy`).  The
-    /// codec picks its own parameters, so no explicit `fqz_gparams` is
-    /// ever supplied; `gp` is passed as NULL.
+    /// `strat` selects the parameter search.  Upstream advertises presets
+    /// 0 to `max_strategy`, but its table also has a custom row at 4 and
+    /// clamps larger indices to that row (`fqzcomp_qual.c:195-203`, `:751`).
+    /// A negative index is refused with `error.InvalidArgument` before
+    /// the native call; nonnegative indices retain the native upper clamp.
+    /// The codec picks its own parameters, so no explicit `fqz_gparams`
+    /// is ever supplied; `gp` is passed as NULL.
     ///
     /// Upstream has no caller-buffer form, so the result is a single
     /// malloced block and comes back as an `Owned`.
+    ///
+    /// No overlap guard runs here.  Upstream reads `slice.len` and
+    /// `slice.flags` while it writes them, and reverses `in` in place, so
+    /// give each buffer its own storage: unlike the `*_to` wrappers this one
+    /// does not compare them for you.
     pub fn compress(vers: c_int, slice: Slice, in: []u8, strat: c_int) Error!Owned {
+        if (strat < 0) return error.InvalidArgument;
         if (slice.num_records == 0) return error.InvalidArgument;
         if (slice.len.len != slice.num_records or slice.flags.len < slice.num_records) {
             return error.InvalidArgument;
         }
         var native = c.fqz_slice{
-            .num_records = @intCast(slice.num_records),
+            // Upstream's field is an `int`; checked rather than cast, so
+            // a record count above INT_MAX is error.LengthOverflow like
+            // every other length boundary here instead of a wrap.
+            .num_records = try narrowInt(slice.num_records),
             .len = @ptrCast(slice.len.ptr),
             .flags = @ptrCast(slice.flags.ptr),
         };
@@ -694,10 +947,29 @@ pub const fqzcomp = struct {
     }
 
     /// Decompresses a block and fills `lengths` with the record lengths.
-    /// `lengths` must have room for every record in the block; upstream
-    /// writes into it without a bound of its own.
+    ///
+    /// `lengths` must not overlap `compressed`: upstream reads the block
+    /// while it writes one `int` per decoded record
+    /// (`fqzcomp_qual.c:1419`-`:1420`), and the facade compares the two
+    /// before the call in every build mode.
+    ///
+    /// **`lengths.len` is the bound upstream is given**, not a
+    /// requirement: `fqz_decompress` receives it as `nlengths` and writes
+    /// `lengths[rec]` only while `rec < nlengths`
+    /// (`fqzcomp_qual.c:1419`).  A block with more records than the array
+    /// holds therefore decodes successfully, with the tail records' lengths
+    /// simply absent - no error, no overflow.  Size the array from the
+    /// record count you expect if you need every one of them.
+    ///
+    /// The entries are filled in as records are decoded, so a call that
+    /// returns `error.OperationFailed` partway through leaves the lengths
+    /// it had already written in place.  Nothing distinguishes them from
+    /// the caller's own prior contents.
+    ///
+    /// A zero-length array is `error.BufferTooSmall` before the call.
     pub fn decompressLengths(compressed: []const u8, lengths: []c_int) Error!Owned {
         if (lengths.len == 0) return error.BufferTooSmall;
+        try checkDisjoint(compressed, std.mem.sliceAsBytes(lengths));
         var out_size: usize = 0;
         return owned(
             c.fqz_decompress(
@@ -710,6 +982,76 @@ pub const fqzcomp = struct {
             out_size,
         );
     }
+
+    /// Analyses a quality block and fills a parameter block and a symbol
+    /// histogram, which is what a caller needs before it can hand its own
+    /// `fqz_gparams` to `fqz_compress`.  Upstream uses this from its own
+    /// parameter-tuning path and calls it a utility
+    /// (`fqzcomp_qual.h:169`-`:172`); `fqzcomp.compress` never needs it
+    /// because it picks its own parameters.
+    ///
+    /// **`slice.flags` is written.**  This call ORs a selector value into
+    /// bits 16 and up of every entry when its heuristic fires
+    /// (`fqzcomp_qual.c:588` and `:597`), the same borrowed-mutably
+    /// arrangement `compress` has and for the same reason; what survives a
+    /// successful call is the selector the analysis chose.  `slice.len` is
+    /// only read.  Both arrays must be **one entry longer than
+    /// `num_records`**: upstream's selector-filter checks read
+    /// `slice.flags[rec]` before checking `rec < num_records`
+    /// (`fqzcomp_qual.c:434`, `:533`), and their skip paths also read
+    /// `slice.len[rec]` (`:436`, `:534`).  A block whose record lengths do
+    /// not exactly consume `in` can reach that extra entry.  The facade
+    /// refuses a shorter pair with `error.InvalidArgument` in every build
+    /// mode rather than leaving those reads to the caller's arrays.
+    /// Supply the extra entry for those native paths; the facade passes
+    /// its contents through unchanged.
+    /// Record-count narrowing precedes that capacity comparison, so a
+    /// count above `max_stream_len` returns `error.LengthOverflow`
+    /// without adding the extra entry to an unrepresentable count.
+    ///
+    /// `in` is read and never written, so a `[]const u8` is honest here even
+    /// though `compress` needs a mutable one.
+    ///
+    /// `params` is the caller's `fqz_param`, taken by pointer and both read
+    /// and written: upstream reads `params.do_qa` at `fqzcomp_qual.c:481` to
+    /// decide whether to tune the selector histogram, and then sets
+    /// `do_dedup` (`:468`), `max_sym` and `nsym` (`:473`-`:477`) among others.
+    /// So it has to be initialised before the call - an all-zero block is a
+    /// valid one - and what it holds afterwards is what upstream computed.
+    ///
+    /// `histogram` receives 256 `u32` counts, one per quality value.  It is
+    /// not cleared first, so it has to start zeroed if the total is to mean
+    /// anything.
+    ///
+    /// Upstream allocates internally and returns `void`
+    /// (`fqzcomp_qual.c:433`-`:436`), so an allocation failure is a silent
+    /// early return that happens before the first write: `histogram`,
+    /// `params` and `slice` are then exactly as the caller left them.  That
+    /// is why this call reports no error and why a caller cannot tell the
+    /// two apart; nothing the facade could return would be honest.
+    ///
+    /// `one_param` selects one selector value from `slice.flags` bits 16 and
+    /// up; -1 analyses every record, which is what upstream's own caller
+    /// passes.
+    pub fn qualStats(
+        slice: Slice,
+        in: []const u8,
+        params: *c.fqz_param,
+        histogram: *[256]u32,
+        one_param: c_int,
+    ) Error!void {
+        if (slice.num_records == 0) return error.InvalidArgument;
+        const num_records = try narrowInt(slice.num_records);
+        if (slice.len.len < slice.num_records + 1 or slice.flags.len < slice.num_records + 1) {
+            return error.InvalidArgument;
+        }
+        var native = c.fqz_slice{
+            .num_records = num_records,
+            .len = @ptrCast(slice.len.ptr),
+            .flags = @ptrCast(slice.flags.ptr),
+        };
+        c.fqz_qual_stats(&native, cPtr(in), in.len, params, histogram, one_param);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -720,10 +1062,27 @@ pub const fqzcomp = struct {
 /// every symbol listed in `Symbols` and never for any other symbol, so the
 /// symbol set is part of the stream contract rather than a detail.
 pub const rle = struct {
-    /// The symbol set used to encode.  A `count` of 0 on entry asks the
-    /// encoder to survey the data and fill both fields in.
+    /// The symbol set, which is part of the stream rather than a detail:
+    /// a decoder cannot read a run-length block without the set the
+    /// encoder used.
+    ///
+    /// `count` must be 0..256 on both sides.  0 on entry to `encode` is not
+    /// "no symbols": it asks the encoder to survey the data and fill both
+    /// fields in (`rle.c:115-118`), and `decode` needs the answer that
+    /// survey produced to read the stream back.  Anything outside that
+    /// range is `error.InvalidArgument`, refused before the C call in every
+    /// build mode, because upstream indexes `syms` with this count and
+    /// checks nothing (`rle.c:112-114`, `:155-156`).
+    ///
+    /// `encode` takes this by pointer and writes it: after a call it holds
+    /// the symbol set actually used.  `decode` takes it `*const` and only
+    /// reads it.
     pub const Symbols = struct {
+        /// The symbols, `count` of them in use.  Upstream reads
+        /// `syms[0..count]`.
         syms: [256]u8 = @splat(0),
+
+        /// How many entries of `syms` are live, 0..256.
         count: c_int = 0,
     };
 
@@ -740,10 +1099,23 @@ pub const rle = struct {
     /// checking neither.  A run of length L costs at most L varint bytes,
     /// so `data.len` is the true bound for both.  (Upstream's own
     /// allocating path asks for `2 * data.len`; that is generous, not
-    /// required.)  Neither may overlap `data`.  `syms` is updated in place
-    /// with the symbol set actually used; pass it to `decode` to read the
-    /// stream back.
+    /// required.)  Neither `run` nor `out` may overlap `data`; that pair is
+    /// the one the facade compares, before the call and in every build
+    /// mode.  It does not compare `run` against `out`, so give the two
+    /// destinations their own storage - upstream writes both in the same
+    /// loop (`rle.c:122`-`:131`).  `syms` is updated in place with the
+    /// symbol set actually used; pass it to `decode` to read the stream
+    /// back.
+    ///
+    /// Upstream's only NULL return on this path is its own allocation
+    /// failure (`rle.c:105`-`:107`), which the facade cannot reach because it
+    /// always supplies `out`.  `error.OperationFailed` here has no cause a
+    /// caller could act on.
     pub fn encode(data: []const u8, run: []u8, syms: *Symbols, out: []u8) Error!Encoded {
+        // Before the aliasing and size checks: the count is a property of
+        // `syms` alone, so refusing it first means an out-of-range count
+        // never gets as far as comparing the caller's buffers.
+        if (syms.count < 0 or syms.count > max_rle_symbols) return error.InvalidArgument;
         try checkDisjoint(data, run);
         try checkDisjoint(data, out);
         if (run.len < data.len or out.len < data.len) return error.BufferTooSmall;
@@ -764,9 +1136,39 @@ pub const rle = struct {
     }
 
     /// Expands a run-length stream into `out` and returns the bytes used.
-    /// `lit` and `run` are the two halves produced by `encode`; neither
-    /// may overlap `out`.
+    /// `lit` and `run` are the two halves produced by `encode`; neither may
+    /// overlap `out`, and each of those two pairs is compared before the
+    /// call.  The two inputs are both read-only and are not compared with
+    /// each other, so they may share storage.
+    ///
+    /// **A failed call leaves `out` partly overwritten.**  Upstream decodes
+    /// straight into the caller's buffer - one byte per literal
+    /// (`rle.c:176`, `:179`), and a whole run at a time through `memset`
+    /// (`rle.c:173`) - and takes its error path from two points inside that
+    /// loop, each of them before the write it guards (`rle.c:163`-`:164`,
+    /// `:171`-`:172`).  What survives an `error.OperationFailed` is then
+    /// exactly the prefix the completed iterations wrote: those bytes hold
+    /// decoded data, the rest still holds whatever the caller had put
+    /// there, and nothing at the call site distinguishes the two.
+    ///
+    /// The length of that prefix is not recoverable.  Upstream returns NULL
+    /// without storing the count it had reached (`rle.c:187`-`:188`), so
+    /// `*out_len` still holds the capacity the wrapper seeded it with -
+    /// `out.len` - and `error.OperationFailed` carries no length back.  The
+    /// wrapper neither clears the destination nor copies anything over it:
+    /// zeroing would replace decoded residue with zeros, not restore what
+    /// the caller had, and it would destroy the only evidence that a decode
+    /// started.  Treat `out` as consumed once the call fails, and decode
+    /// into it again only after re-establishing its contents.
+    ///
+    /// A destination too small to hold the result is that same
+    /// `error.OperationFailed`, not a resizable `error.BufferTooSmall`:
+    /// upstream compares its own `outp` against the end it derived from
+    /// `*out_len` and reports no size it needed.  An empty `out` is refused
+    /// at the top of the first iteration with nothing written; an empty
+    /// `lit` never enters the loop and succeeds, returning 0.
     pub fn decode(lit: []const u8, run: []const u8, syms: *const Symbols, out: []u8) Error!usize {
+        if (syms.count < 0 or syms.count > max_rle_symbols) return error.InvalidArgument;
         try checkDisjoint(lit, out);
         try checkDisjoint(run, out);
         var out_len: u64 = out.len;
@@ -809,6 +1211,23 @@ pub const tok3 = struct {
     /// it receives the offset of the first byte of the trailing partial
     /// line, so a caller streaming large files can carry the remainder
     /// into the next block.
+    ///
+    /// **A failed call can leave `last_start` holding residue.**  Upstream
+    /// writes it exactly once, at `tokenise_name3.c:1482`-`:1483`, once it
+    /// has scanned the whole block and built the trie.  A failure before
+    /// that point - `create_context` at `:1464`, or `build_trie` at
+    /// `:1477` - returns without touching it, so whatever the caller had
+    /// there survives; a failure after it leaves upstream's offset there.
+    /// The wrapper neither clears nor synthesises it, because it cannot tell
+    /// which of the two it is looking at: both arrive as
+    /// `error.OperationFailed`.  Treat the value as meaningful only when
+    /// the call succeeded.
+    ///
+    /// The block's own state splits on the same line.  Before `:1483`
+    /// nothing has been rewritten; after it, every separator already passed
+    /// has become `\0` and the rest may not have, so a failed call can
+    /// leave a block that is neither the input nor a decodable stream.
+    /// Rebuild it from your own copy before retrying.
     pub fn encodeNames(
         block: []u8,
         level: c_int,
@@ -870,6 +1289,9 @@ pub const pack = struct {
     /// That fill happens before the width check, so `meta` is
     /// meaningless when this returns an error — the map may hold 256
     /// symbols even though the call failed.
+    /// `data` must not overlap `meta.map`: upstream reads data again after
+    /// writing the map (`htscodecs/pack.c:63-70`, `:98-100`). This pair is not
+    /// checked by the facade.
     pub fn packData(data: []const u8, meta: *Meta) Error!Owned {
         var out_len: u64 = 0;
         return owned(
@@ -887,7 +1309,13 @@ pub const pack = struct {
     /// Reads the map at the front of a packed stream.  `map` receives the
     /// used symbols and `nsym` the symbols per byte (0, 1, 2, 4 or 8).
     /// Returns the number of header bytes consumed.  `map` must be at
-    /// least 256 bytes.
+    /// least 256 bytes, or this is `error.InvalidArgument` before the call.
+    ///
+    /// `data.len` is narrowed to upstream's `uint32_t` (`pack.h:66`), so a
+    /// longer slice is `error.LengthOverflow`.
+    ///
+    /// Upstream reads `data` while it fills `map`, so the two must be
+    /// separate regions.  Nothing here compares them for you.
     pub fn unpackMeta(data: []const u8, udata_len: u64, map: []u8) Error!struct { consumed: usize, nsym: c_int } {
         if (map.len < min_map_len) return error.InvalidArgument;
         if (data.len > std.math.maxInt(u32)) return error.LengthOverflow;
@@ -898,8 +1326,23 @@ pub const pack = struct {
     }
 
     /// Expands a packed stream into `out` using the map and symbol count
-    /// from `unpackMeta`.  `out` must be the exact unpacked size, and
-    /// `map` at least 256 bytes.
+    /// from `unpackMeta`.  The caller must supply the exact unpacked size
+    /// in `out.len`; packed bits alone do not retain it.  The facade does
+    /// not validate that size.  A native NULL, including a packed-input
+    /// length rejection, becomes `error.OperationFailed`.  `map` must be
+    /// at least 256 bytes or the facade returns `error.InvalidArgument`.
+    /// `data` and `out` are compared, and overlapping them is
+    /// refused before the call in every build mode.  `map` is not
+    /// compared, though upstream reads it while it writes `out`, so keep
+    /// it clear of the destination.  Of the two lengths it takes, only
+    /// `data.len` is bounded: upstream's parameter is `int64_t len`
+    /// (`pack.h:80`), narrowed by the same `narrowInt` the rest of the
+    /// facade uses, so a slice longer than `max_stream_len` is
+    /// `error.LengthOverflow` before the call.  That ceiling is the
+    /// facade's own: `int64_t` could carry four billion times as much, and
+    /// the wrapper refuses at the shared `narrowInt` bound regardless.
+    /// `out.len` is the other length and reaches upstream as a `uint64_t`,
+    /// not narrowed.
     ///
     /// The returned length is what upstream actually wrote, which is not
     /// always `out.len`: `nsym == 1` means "not packed at all", which

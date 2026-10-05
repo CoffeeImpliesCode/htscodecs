@@ -38,6 +38,16 @@
 
 #include <stdint.h>
 
+/* Upstream's branch, left as upstream wrote it.  Nothing in this package
+ * defines VARINT2, so the C core and the translated interface both read the
+ * #else below and this branch is never opened.  That is a fact about this
+ * package's configuration, not about the header, and it does not survive the
+ * install: htscodecs/varint2.h is in the source tree and in no install list
+ * (upstream's own nobase_include_HEADERS omits it, Makefile.am:37-46), while
+ * this header is installed verbatim -- so a consumer that compiles with
+ * -DVARINT2 against an installed prefix has no varint2.h beside it to find.
+ * See build.zig, "Why no -I", and FORK-NOTES section 38. */
+
 #ifdef VARINT2
 #include "varint2.h"
 #else

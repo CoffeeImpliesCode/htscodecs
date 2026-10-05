@@ -53,3 +53,16 @@ tests/varint
 # operator who redirects the cache with --cache-dir owns that path.
 .zig-cache/
 zig-out/
+
+# Zig 0.16 materialises an archive-fetched dependency beside the build root
+# that asked for it (AGENTS.md section 6), so it is a working-tree
+# artefact like .zig-cache/ and not a package path.  consumer/ gets its own
+# copy by the same rule; the patterns carry no leading slash.
+zig-pkg/
+
+# `--prefix` sends the install tree somewhere else entirely, but a build
+# that installs into its own root (or a runner invoked with an explicit
+# destination) leaves `result` symlinks behind.  Both names, never a
+# leading slash, so they also match under consumer/.
+result
+result-*

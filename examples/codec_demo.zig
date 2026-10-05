@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Runnable demonstration of the htscodecs facade.
 //!
 //! `zig build smoke` runs this and prints a fixed report: the same inputs,
@@ -5,6 +6,12 @@
 //! timing, addresses, environment or the file system.  A mismatch against
 //! an upstream fixture is a hard error, not a printed warning, so the smoke
 //! step fails loudly if the library stops being interoperable.
+//!
+//! In a runtime-loading build (`-Druntime=true`) nothing is linked, so the
+//! provider is named explicitly: `--provider <path>` on the command line or
+//! `HTSCODECS_PROVIDER` in the environment.  A run that was told neither says
+//! so and fails; there is no default file, no search path and no fallback to
+//! a linked copy.
 
 const std = @import("std");
 const htscodecs = @import("htscodecs");
@@ -20,6 +27,12 @@ const Method = struct {
     method: c_int,
 };
 
+/// What this program adds to what `load` can already say.
+const ConfigurationError = error{ NoProviderConfigured };
+
+/// The environment variable naming the provider file.
+const provider_variable = "HTSCODECS_PROVIDER";
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
 
@@ -28,9 +41,17 @@ pub fn main(init: std.process.Init) !void {
     defer file_writer.flush() catch {};
     const out = &file_writer.interface;
 
-    try out.print("htscodecs {s} (packed version {d})\n\n", .{
+    // A linked build has the library in the binary and needs nothing.  A
+    // runtime-loading build has an empty table until a provider is named, and
+    // every call below would otherwise stop the program naming itself.
+    if (comptime htscodecs.runtime_loaded) {
+        try htscodecs.load(.{ .path = try providerRequest(init) });
+    }
+
+    try out.print("htscodecs {s} (packed version {d}, {s} build)\n\n", .{
         htscodecs.versionText(),
         htscodecs.version(),
+        if (htscodecs.runtime_loaded) "runtime-loaded" else "linked",
     });
 
     try reportCompression(out, gpa);
@@ -219,4 +240,71 @@ fn reportOwnership(out: *std.Io.Writer, gpa: std.mem.Allocator) !void {
     const owned = try htscodecs.rans4x8.compress(payload, 0);
     try out.print("  Owned         : {d: >7} bytes from upstream malloc, released with free()\n", .{owned.len});
     owned.deinit();
+
+    // The library's own pool is a different family with a different pairing:
+    // what `tls.alloc` returns is released with `tls.free`, and libc `free`
+    // is never the right releaser for it.  Compressing into provider memory
+    // and reading it back is what shows the bytes are real and writable, not
+    // that a pointer came back non-null.
+    const pool_bound = try htscodecs.rans4x16.compressBound(payload.len, 0);
+    const pool_scratch = try htscodecs.tls.alloc(pool_bound);
+    defer htscodecs.tls.free(pool_scratch);
+    const pool_len = try htscodecs.rans4x16.compressTo(payload, pool_scratch[0..pool_bound], 0);
+
+    const pool_plain = try htscodecs.tls.alloc(payload.len);
+    defer htscodecs.tls.free(pool_plain);
+    const pool_read = try htscodecs.rans4x16.uncompressTo(pool_scratch[0..pool_len], pool_plain[0..payload.len]);
+    if (pool_read != payload.len or !std.mem.eql(u8, pool_plain[0..pool_read], payload)) {
+        return error.RoundTripMismatch;
+    }
+    try out.print("  provider pool : {d: >7} + {d: >7} bytes from htscodecs_tls_alloc, released with htscodecs_tls_free\n", .{
+        pool_bound, payload.len,
+    });
+
+    // Only a runtime-loading build has a request to report, and only the
+    // generated dispatch has the function to ask: a linked build's `c` is
+    // the translated header and declares no `loadedSource` at all, so the
+    // call is inside the branch that drops it there.
+    if (comptime htscodecs.runtime_loaded) {
+        try out.print("\n  loaded source : {?s}\n", .{
+            if (htscodecs.loadedSource()) |source| switch (source) {
+                .path => |p| p,
+                .system => |s| s,
+            } else null,
+        });
+    }
+}
+
+/// The provider this run should load, from `--provider <path>` or from
+/// `HTSCODECS_PROVIDER`.
+///
+/// Both are explicit.  Nothing here looks in a default location or falls back
+/// to a linked copy: a runtime-loading build that was not told which file to
+/// load reports that it was not told, rather than loading something else.
+fn providerRequest(init: std.process.Init) ConfigurationError![]const u8 {
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch
+        return noProvider();
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--provider")) {
+            if (index + 1 >= args.len) return noProvider();
+            return args[index + 1];
+        }
+    }
+    return init.environ_map.get(provider_variable) orelse
+        return noProvider();
+}
+
+/// Say which variable is missing.  An error name on its own would send the
+/// next person into the loader instead of to the command line.
+fn noProvider() ConfigurationError {
+    std.debug.print(
+        "htscodecs demo: this is a runtime-loading build, so nothing is linked " ++
+            "and every codec call needs a provider first.  Pass --provider " ++
+            "<path>, or export {s} with a shared object exporting every entry " ++
+            "point of the installed htscodecs headers.  Nothing is loaded by " ++
+            "default and no other file is tried.\n",
+        .{provider_variable},
+    );
+    return error.NoProviderConfigured;
 }

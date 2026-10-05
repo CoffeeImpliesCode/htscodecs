@@ -24,6 +24,14 @@ The fork's own gate results, observed by the integrator with Zig 0.16.0, are:
   passes and exercises every facade codec plus the raw C.  Receipts are listed
   in `CHANGELOG.md` entry 13 and in the workspace ledger.
 
+* `HTSCODECS_PROVIDER=<provider> zig build test -Druntime=true
+  -Dlinkage=static` 6/6: the runtime route against a static provider,
+  exercising real compression in every mode the library has and decoding
+  upstream's checked-in fixtures.  That is one host, one optimisation mode
+  and one of the four runtime/linkage combinations; the shared-provider
+  counterpart and the other two carry no receipt.  Recorded in
+  `CHANGELOG.md` entry 16.
+
 That is a statement about those commands and those steps.  It does not promote
 any individual entry above its own mark, because an entry's claim and a step's
 exit code are different things.
@@ -300,15 +308,37 @@ exit code are different things.
   declarations for symbols the linked library may not export.
 * **Cause.** Design constraint, recorded before any mismatch was observed.
   No version mismatch has actually been seen in this fork.
-* **Fix.** `-Dsystem=true` switches the translation root to
+* **Fix.** `-fsys=htscodecs` switches the translation root to
   `include/htscodecs_system.h`, which includes the *installed* headers off
   the system include path.  Fork-only `htscodecs_config.h` is not included
   there, so the per-ISA 32x16 declarations stay hidden exactly when the
   installed build might not have them, and a missing declaration is a build
-  error naming it rather than a link error later.
+  error naming it rather than a link error later.  That same private header
+  now also discharges the assumption the installed public headers leave
+  open: an earlier positive system-library wave failed across its cells with
+  fixed-width integer types and `size_t` undeclared in the translated
+  surface, because `pack.h`, `rle.h`, `tokenise_name3.h` and the rest carry no
+  `#include` line of their own and this file reached them without
+  establishing what they use.  It now includes the `<stdint.h>` and
+  `<stddef.h>` family ahead of the installed `<htscodecs/...>` set.  The
+  native aggregate header `include/htscodecs_all.h` is untouched by that
+  change — it already carried the same include set at `:93-94` — and the
+  change set also carries the selected-platform-configuration fix and the
+  removal of the empty shim.
 * **Rule.** Headers and library must come from the same source in any
-  system-integration mode.
-* **Verification.** unverified.
+  system-integration mode.  Whichever header is the translation root owes
+  the standard types the public headers it reaches use, because those
+  headers include nothing themselves.
+* **Verification.** **Applied; not yet re-gated**, and still `unverified` as
+  a behavioural claim: no receipt re-runs htscodecs after the fix, so nothing
+  is promoted on its account and no earlier failing cell is recorded as a
+  pass.  The 53-target cohort `20261004T221720228710Z-45046` (receipt
+  `htscodecs-53-target-8.json`; 18 runtime passes, 31 `build_only`, runtime
+  failures `aarch64_be-linux` and `thumbeb-linux`, build failures
+  `aarch64-netbsd` and `aarch64_be-netbsd`, driver exit 1) and the 2026-10-05
+  compile-only baselines `20261005T014547Z-797a73f2` both predate it, and the
+  positive-system wave itself is not an all-PASS record.  Settling it needs a
+  fresh run of this SDK's own gates after the fix.
 
 ## 17. The provenance gate has to run without a working git
 
@@ -694,6 +724,28 @@ exit code are different things.
   `pack.h`, `rle.h`, `arith_dynamic.h` and `tokenise_name3.h`; the `headers`
   step has not run here.
 
+*(Amended by entries 35 and 36.  Consuming the header is still the right rule,
+but "the header has already declared every name" does not finish the argument:
+a declaration is not a definition.  One declared name here,
+`rans_compress_O0_32x16_sse4`, has no definition in this archive, so taking
+its address leaves an undefined symbol rather than proving anything.  The
+consequence is recorded in `CHANGELOG.md` entry 16 and in `README.md`'s
+matrix; nothing has been linked here to observe it.)*
+
+*(The consequence above has since been withdrawn; the rule has not.  The proof
+no longer takes that address.  Its first translation unit now names
+`rans_uncompress_O0_32x16_sse4` — defined at
+`rANS_static32x16pr_sse4.c:462`, already in this build's own SSE4 export list
+at `build.zig:208`-`:211` — with that decoder's real signature, whose fourth
+parameter is `unsigned int` by value where the encoder's is `unsigned int *`
+(`build.zig:208`-`:211`, with the reasoning in that function's doc comment
+at `:147`-`:157`).  So the three-way claim this entry made is now two-way:
+the export list and the dispatch still have to be read out of the objects,
+and the proof no longer supplies a third failure of its own.  The header is
+still the right thing to consume; it is still not a definition list.
+Source-confirmed only — `zig build headers` and `headers-run` have not been run
+since, so the row is unverified and not green.)*
+
 ## 31. A documented guard that was an assert, and a bound the wrapper did not own
 
 * **Evidence.** The module documentation promised that aliasing is rejected
@@ -722,3 +774,660 @@ exit code are different things.
   upstream trusting its caller is not a reason for the facade to.
 * **Platforms.** Any. **Verification.** source-confirmed against `rle.c` and
   the pinned `lib/std`; the tests have not run here.
+
+## 32. The fork's README was upstream's file, and the build it described was not this build
+
+* **Evidence.** `README.md` was byte-identical to upstream's, sha256
+  `b77d87e58c92f1aae4e74f8071c589ae23d424da82d2d73fa8434525be22de26`, and
+  its build section said "If building from git, you'll need to recreate the
+  configure script using autoconf" followed by `./configure; make`.  The
+  repository has no `configure` step: `build.zig` builds the library, and
+  entry 1 has said so since the beginning.  The same file also carried a
+  Cirrus badge for the upstream maintainer's CI, which entry 6 removed from
+  `.cirrus.yml` and left in the prose.
+* **Cause.** Confirmed, and it is not a licence question.  Preserving an
+  upstream file unmodified is right for provenance and wrong for
+  orientation: the reader who opens the repository is looking for how to
+  build *this*, and the file that answers that question was answering it for
+  a different build.  Preserving the bytes and serving them from the
+  canonical path were being treated as one decision when they are two.
+* **Fix.** Split them.  Upstream's bytes were copied to `README.upstream.md`
+  first and the digest verified equal before `README.md` was replaced, so the
+  preserved copy is a fact rather than a hope.  `README.md` is new prose in a
+  fixed order — native-source deviations, native-build deviations with a
+  dated history link, the build/run/test matrix, consumption — and links to
+  `README.upstream.md` in its first paragraph.  Two other owners had to
+  follow the bytes: the CI pinned-commit diff now names `README.upstream.md`,
+  and `build.zig.zon` `.paths` had to carry every new path so a fetched
+  package is not quietly missing its own licence record.
+* **Rule.** Preserve upstream bytes at a path that names them, and let the
+  canonical path describe the build that actually exists.  Every gate that
+  compares against the pinned commit follows the bytes, not the name: a
+  pristine-diff list is a list of paths, and moving a file's contents without
+  moving that list turns a provenance check into a tautology.  Verify the
+  copy by digest before overwriting anything.
+* **Platforms.** Any fork that vendors an upstream documentation file.
+  **Verification.** source-confirmed: `cmp` and `sha256sum` reported the two
+  paths identical immediately before `README.md` was rewritten, and the
+  driver's proof record carries the same digest.  No build has been run since.
+
+## 33. A per-project licence is a grant with a path list, not a label on a tree
+
+* **Evidence.** Upstream's grant is a default with three named exceptions:
+  `LICENSE.md:1-2` covers everything, `LICENSE.md:31-37` takes
+  `c_range_coder.h`, `rANS_byte.h` and `rANS_word.h` out of it as public
+  domain, and `LICENSE.md:39-45` carries Fabien Giesen's CC0 waiver.  Reading
+  the two rANS headers shows where that waiver is *not*: each has a one-line
+  public-domain statement at line 11 and no waiver text at all.
+  `c_range_coder.h:1-4` is a different mechanism again — a dedication in the
+  file, credited for modification, with no CC0 anywhere.  Meanwhile the files
+  this fork wrote had no grant of any kind, only the implied one.
+* **Cause.** Confirmed.  Upstream's terms say nothing about fork-authored
+  files, so "the tree is BSD" was simultaneously incomplete (it claimed
+  nothing for the fork's own work) and wrong (it would have swept three
+  public-domain headers into a BSD label).  Both errors come from treating a
+  licence as a property of a directory instead of of a file.
+* **Fix.** `FORK-LICENSE.md` records the owner authorization, the grant
+  (BSD-3-Clause, matching upstream's primary terms), the SPDX identifier,
+  the exact path list it covers and the paths it does not, including
+  `.gitignore`'s mixed status.  No individual is named as the fork's
+  copyright holder, and upstream authors are not credited with fork work.
+  `NOTICE.md` §3 became a per-file inventory with the notice each file
+  actually carries and its line numbers, and the CC0 text's single home in
+  `LICENSE.md` is stated where it is easy to get wrong.
+* **Rule.** Name the term and the line, per file.  A metadata label describes
+  the library; it never overrides a file-specific term.  Ship the licence
+  text the exceptions cite — `zig build install` puts `LICENSE.md` in
+  `share/licenses/htscodecs/` for that reason — and give each copy one owner.
+* **Platforms.** Any fork with per-file licence exceptions.
+  **Verification.** source-confirmed by reading `LICENSE.md`,
+  `c_range_coder.h`, `rANS_byte.h`, `rANS_word.h`, `utils.h` and every source
+  and test file's header notice.  No redistribution has been exercised.
+
+## 34. Two packaging variants are one build script and one flag
+
+* **Evidence.** The Zig setup hook in nixpkgs appends `--prefix $prefix` and
+  `--release=safe` to `zig build install` on its own, and
+  `LibraryOptions.linkage` defaults to `.static`, so a derivation that says
+  nothing says less than it appears to.  A shared variant of this library
+  needs more than a flag: the per-ISA 32x16 objects are separate compilations
+  and have to be PIC too, and on Windows the DLL's export table would be empty
+  because no htscodecs header carries `dllexport` decoration.
+* **Cause.** The defaults were inherited, not declared, and the variants were
+  expressed in the wrong place: a `{static,shared,default}` set inside
+  `package.nix` makes the packaging file a second convention that a second
+  entry point has to know the shape of.
+* **Fix.** One uncurried `package.nix` returning one derivation, with
+  `linkage ? "static"` as the selector; `flake.nix` and `devenv.nix` choose it
+  and pass `bzip2 = null`, because `callPackage` fills an argument from the
+  package set whenever a matching attribute exists.  The setup-hook phases are
+  disabled (`dontUseZigConfigure`, `dontUseZigBuild`, `dontUseZigCheck`,
+  `dontUseZigInstall`) but `dontInstall` is *not* set, because it would
+  disable the derivation's own `installPhase`.  That phase names every flag:
+  `-j"$NIX_BUILD_CORES"`, `--prefix`, one `-Doptimize`, `-Dcpu=baseline`,
+  `-Dlinkage`, and `-Dbz2=true` only with a `bzip2` argument.  Both Zig caches
+  go under `$TMPDIR`, since the source tree is read-only.  PIC for the ISA
+  objects and the Windows export list belong to the build graph; the
+  derivation names neither.
+* **Rule.** A derivation states its own flags instead of inheriting a setup
+  hook's, and one build script serves every packaging variant with an option
+  rather than a copy.  The canonical development shell holds tools, not the
+  package it develops: entering a shell must not build the library.  And a
+  build that installs licence material has exactly one owner, so a
+  derivation does not copy what `zig build install` already installed.
+* **Platforms.** Zig 0.16.0 with nixpkgs `c7def046b9a883d46974757852106483d741586f`.
+  **Verification.** source-confirmed against the pinned `lib/std`, the
+  nixpkgs `zig/generic.nix` and `setup-hook.sh` read out of the local nixpkgs
+  tree.  No derivation has been evaluated and no flake has been built; the
+  driver owns `flake.lock` and `devenv.lock` and runs those gates.
+
+## 35. A declaration in a header is not an implementation in the library
+
+* **Evidence.**  `rANS_static32x16pr.h:83`-`:86` declares
+  `rans_compress_O0_32x16_sse4` under
+  `HAVE_SSE4_1 && HAVE_SSSE3 && HAVE_POPCNT`, and the same header's section
+  comment at `:81` already says "Intel SSE4 implementation.  Only the O0
+  decoder for now".  The only definition upstream ever wrote is inside the
+  `#if 0` block at `rANS_static32x16pr_sse4.c:113`-`:460`, under its own reason
+  at `:111`-`:112`: "SSE4 implementation of the Order-0 encoder is poorly
+  performing.  Disabled for now."  The file compiles; the function does not
+  exist in the object.  Reading the eleven installed upstream headers gives 46
+  function declarations, of which this is the single one with no compiled
+  definition; the target-derived subset a configuration exposes is 42 on
+  `x86_64`, 35 on `aarch64`, 31 on `riscv64` and `wasm32`.
+* **Cause.**  Upstream's header and its source disagree, deliberately and at a
+  release tag, and the disagreement is invisible to every tool that reads
+  headers.  Anything that derives a symbol list from a header inherits it:
+  a Windows export definition then names a symbol the object does not
+  contain, a runtime dispatch table demands one no provider can ever supply,
+  and a proof translation unit that takes the address of each declared name
+  cannot link.  All three land at link or load time on one architecture only,
+  so nothing narrower than a full link sees them.  (The third of those three
+  has since been repaired: the installed-header proof now names a decoder the
+  SSE4 kernel defines rather than the encoder that upstream left in `#if 0`.
+  The first two are why the export lists and the optional-name entry exist at
+  all, and they are unchanged.)
+* **Fix.**  The `#if 0` stays exactly as pinned — re-enabling it would edit
+  native source, and writing a replacement would publish a function upstream
+  never wrote under upstream's name.  Instead the exception is named in one
+  place in each record, the per-kernel export lists in `build.zig` are read
+  out of what each kernel source defines, and the runtime route marks that
+  single name optional.  A call to it is refused by name rather than served:
+  a panic in a runtime-loaded build, and an ordinary link error in a linked
+  one, where the caller must supply its own external definition.
+* **Rule.**  "Declared in the installed header" is a claim about
+  declarations, and it has to be stated as one.  An absent implementation is
+  recorded by name, with its source evidence and its target-derived scope —
+  never as a general caution about "optional symbols", and never by
+  publishing a stand-in that covers part of what the missing function would
+  have done.  Where one declaration is the exception, the rest of the surface
+  is stated as required rather than left to an assumption that a declaration
+  implies a definition.
+* **Platforms.**  Any pinned C library whose installed headers and sources can
+  disagree.  **Verification.**  source-confirmed by reading the pinned header
+  and the pinned kernel source, and by reading the export lists and the
+  dispatch's optional-name table in this tree.  No build, link or load has
+  been run here.
+
+## 36. The required-symbol set is target-derived, and a symbol list is read out of the objects
+
+* **Evidence.**  Which 32x16 entry points a configuration even declares is
+  fixed by preprocessor gates: `rANS_static32x16pr.h:82` for the SSE4 trio,
+  `:101` for AVX2, `:125` for AVX512, `:149` for Neon, and
+  `include/htscodecs_config.h:74`-`:90` derives the three x86 sets from
+  `__x86_64__` alone.  So "every function the header set declares" is not one
+  number: it is 42 on `x86_64`, 35 on `aarch64`, 31 on `riscv64` and
+  `wasm32`.  Two places in this tree had drifted from that, and both have
+  since been corrected.  `build.zig` justified keeping the kernel export
+  lists off the header's declarations by citing
+  `rans_compress_O1_32x16_sse4` at `rANS_static32x16pr.h:93`; line 93
+  declares `rans_uncompress_O1_32x16_sse4`, and no order-1 SSE4 encoder is
+  declared anywhere in the header — the list was right and the stated reason
+  was not, and `build.zig:121`-`:132` now gives the real one.  And the
+  installed-header proof's first translation unit took the address of
+  `rans_compress_O0_32x16_sse4` under the header's own macros, which was the
+  undefined symbol of entry 35; it now names `rans_uncompress_O0_32x16_sse4`
+  (`build.zig:1396`-`:1407`), so that half of the evidence no longer holds and
+  `README.md`'s header-proof row has been corrected rather than left to imply
+  an expected link failure.
+* **Cause.**  A symbol list written by reading a header is a claim about a
+  header.  It stays right until the configuration changes underneath it, and
+  when it is wrong the error appears at link time, on one architecture, in a
+  step nobody runs routinely.  Marking too little optional is just as wrong as
+  marking too much: an optional symbol whose absence is ordinary teaches a
+  provider contract that is not the one the rest of the file is enforcing.
+* **Fix.**  The dispatch asks for exactly what this build's own translation
+  produced, so its required set cannot be a second hand-maintained
+  convention; per-kernel export lists are what each kernel source defines; and
+  precisely one name — the entry-35 exception, with its source citation in
+  the code — is optional.  Everything else the configured headers declare is
+  required, and a provider that does not export one of them is refused when
+  it loads rather than half used.  The two drifted statements are recorded in
+  `CHANGELOG.md` entry 16 rather than quietly rewritten, because the files
+  that carry them belong to another owner.
+* **Rule.**  Derive symbol lists from the artifacts, not from the headers that
+  describe them, and let the compiler's own output define the set.  Scope a
+  claim like "every declaration is implemented" to the configuration it was
+  counted in.  And when one exception exists, write down the rest as
+  required: a required set that nobody stated is indistinguishable from an
+  optional one nobody checked.
+* **Platforms.**  Any build that publishes a dispatch table, an export
+  definition or a proof translation unit.  **Verification.**
+  source-confirmed by reading the gates, the export tables and the dispatch's
+  name lists in this tree.  Nothing has been linked or loaded here.  The link
+  consequence this entry recorded for the header proof has been withdrawn —
+  the proof no longer references the undefined name — and its replacement has
+  not been linked either, so `README.md`'s header row is unverified and not
+  green.  Both corrections above are comment- and name-level edits that
+  change no artifact, and both landed after the 2026-10-04 receipts recorded
+  in entry 37.
+
+## 37. A platform that cannot load a shared object refuses the request, it does not answer it
+
+* **Evidence.**  Observed, from the parent's run and not reproduced here:
+  `zig build check-shared` over this package's six targets exited 1 with
+  61/67 steps.  The five hosted rows compiled completely; the `wasm32-wasi`
+  row failed at the library with `wasm-ld: warning: creating shared
+  libraries, with -shared, is not yet stable`, and each of that row's five
+  consumers then failed on its own with `error: unrecognized file extension
+  of parameter '.../htscodecs.wasm'` — four `test-obj` compilations and the
+  `build-exe` for `examples/codec_demo.zig`.  Receipt
+  `htscodecs-current-six-target-check-shared-2026-10-04T14-44-05.968751+00-00.json`
+  in the current-baseline evidence directory, 2026-10-04T14:44:05Z, exit 1,
+  187 s.  The platform fact behind it is `SOURCE-CONFIRMED` in Zig 0.16.0's
+  own source: `std.Target.DynamicLinker.kind` is `.none` for `.wasi`
+  (`lib/std/Target.zig:2385`) and the function is
+  `lib/std/Target.zig:2345`-`:2403`.
+* **Cause.**  A linker will happily emit a shared object for a target that
+  has no loader for it.  The request was honest — "give me the shared
+  library" — and the toolchain answered it with a file named
+  `htscodecs.wasm`, which is not a shared library, and the build graph then
+  spent the rest of the row failing to link five consumers against a
+  parameter whose extension the linker does not recognise.  Every one of
+  those five errors was downstream of one unexamined platform fact, and none
+  of them named it.
+* **Fix.**  `targetCarriesSharedObject` resolves the platform question from
+  `std.Target.DynamicLinker.kind`, with `.windows` returned separately as the
+  one `.none` that still carries a shared object (`:2380`: a PE/COFF image has
+  no interpreter path, and its imports are resolved by the loader inside the
+  OS).  `sharedObjectRefusal` renders one message from it.  `build()` calls
+  it for the selected published target before any step is created, so
+  `zig build -Dtarget=wasm32-wasi -Dlinkage=dynamic` stops at configure;
+  `addOneCheckTarget` turns an unsupported matrix row into an `addFail` step
+  carrying the same text, so `check-shared` reports the row by name, builds
+  nothing for it and still compiles the other five.  Nothing is substituted,
+  no row is dropped, and the static matrix — a separate step — still walks
+  that target.
+* **Rule.**  When a build option names an artifact and the platform cannot
+  produce that artifact, the build produces it or says why it cannot.  A
+  build that emits something else under the requested name has answered a
+  question nobody asked, and it does so most expensively: the real cost is
+  not the wrong file, it is every consumer that fails afterwards on a
+  symptom of the substitution rather than on its cause.  Refuse at the point
+  the option is read, put the platform fact and the spelling that works in
+  the message, and never let the refusal take down a *different* step that
+  happens to walk the same target — the two linkages are two steps here for
+  exactly that reason.
+* **Targets bound.**  Any target whose OS answers `.none` from
+  `std.Target.DynamicLinker.kind`, other than `.windows`.  In this matrix
+  that is `wasm32-wasi`.  The predicate reads the OS tag, so a target with a
+  dynamic linker for some ABIs and not others is not distinguished; if such
+  a combination is ever added to the matrix, the predicate is where it has
+  to be refined.  The default `-Dlinkage=static` and the orthogonal
+  `-Druntime=true` are untouched, and so is `-fsys=htscodecs`, where the
+  installed library's linkage is not this build's to choose.
+* **Verification.**  Observed, twice over, by the driver and not re-run here.
+  First the failure above: `zig build check-shared` over the six targets
+  exited 1 with 61/67 steps.  Then, after the change, seven runs on
+  2026-10-04 (`local://foundation-htscodecs-refusal-verification-manifest.json`,
+  listed in `CHANGELOG.md` entry 17):
+  * `zig build check` — exit 0, 66/66, all six targets including
+    `wasm32-wasi`.  The static delivery for the refused target is intact.
+  * `zig build check-shared -Dcheck-targets=<the five hosted rows>` — exit 0,
+    59/59; the same five with `-Druntime=true` — exit 0, 41/41.  The hosted
+    shared graphs are real, in both facade routes.
+  * `zig build check-shared` over all six — exit 1, 58/60, **one** failed
+    step, and it is the refusal: `error: htscodecs: check-shared row
+    wasm32-wasi: …`.  The five hosted rows compiled, no `htscodecs.wasm` was
+    produced, and `unrecognized file extension` appears nowhere in the
+    output.  Five downstream link errors became one named refusal.
+  * `zig build install -Dtarget=wasm32-wasi -Dlinkage=dynamic` — exit 1 at
+    configure, inside `build()` in `build.zig`, before any step exists.
+  * `zig build test smoke` — exit 0 with 42 tests passed under
+    `-Dlinkage=static` and again under `-Dlinkage=dynamic`.
+
+  Two exits of 1 are the requested outcomes; neither asserts that a shared
+  `wasm32-wasi` artifact builds, because there is none.  Still
+  `PENDING-VERIFICATION`, and deliberately not claimed by these receipts:
+  the three source corrections that landed *after* them (the header-proof
+  symbol, the private fixtures module, the split `devenv` tasks), the other
+  optimisation modes, `-Dbz2=true`, `-fsys=htscodecs`, the Nix and devenv
+  packaging surfaces, and the 53-platform matrix.
+
+## 38. An aggregate header is not a header the bundled preprocessor can be trusted to read
+
+* **Evidence.**  `include/htscodecs_all.h` is not self-contained.  It reaches
+  five libc headers: `<stdint.h>` and `<stddef.h>` at `:93`-`:94`, and through
+  `utils.h:37-39` — included at `include/htscodecs_all.h:113` — `<string.h>`,
+  `<stdlib.h>` and `<math.h>`.  The only other include the aggregate names is
+  `varint.h:52`'s `"varint2.h"`, and this build never reaches it: that line is
+  inside the `#ifdef VARINT2` branch at `varint.h:51-53`, nothing in this
+  package defines `VARINT2`, and both the C core and Aro read the `#else` at
+  `:53`.  `zig translate-c` parses C with **Aro**, which preprocesses as well
+  as parses, so every one of those five has to be read by Aro before the parser
+  sees an htscodecs declaration.
+  Observed, from the parent's 53-platform run and not re-run here: fifteen of
+  the fifty-three published cells failed to translate this aggregate with Aro
+  alone — nine NetBSD, five OpenBSD and `x86-windows` — and each failure was
+  in Aro's own read of that target's C library.  The other thirty-eight
+  translated from the aggregate as it stands.
+  The same fact bounds what the installed prefix offers.  `htscodecs/varint2.h`
+  is in the tree and in neither install table — upstream's own
+  `nobase_include_HEADERS` omits it (`Makefile.am:37-46`), `upstream_headers`
+  (`build.zig:349-361`) carries `varint.h` and not `varint2.h`, `fork_headers`
+  (`:363-366`) carries the two fork headers, and `installHeaders`
+  (`build.zig:1672-1687`) installs exactly those two — while the installed
+  `htscodecs/varint.h` keeps its `#ifdef VARINT2` branch verbatim.  A consumer
+  that compiles with `-DVARINT2` against the installed prefix therefore has no
+  `varint2.h` to find, and the `headers` step cannot stand in for one: it
+  compiles the installed aggregate under this package's own configuration
+  (`build.zig:1702-1704`), where that branch is off.  `PENDING-VERIFICATION`,
+  and deliberately not claimed here: no `-DVARINT2` consumer build has been
+  run against an installed prefix, so the failure above is read off the source
+  and not observed.
+* **Cause.**  Three C libraries and three different facts, none of them in
+  htscodecs:
+  * **NetBSD.**  `__END_DECLS` is `__END_PUBLIC_DECLS`
+    (`generic-netbsd/sys/cdefs.h:431-432`), and under the `#if
+    __GNUC_PREREQ__(4, 0)` at `:408` that macro is framed in two `_Pragma`
+    operators — `__BEGIN_PUBLIC_DECLS` at `:411-412`, `__END_PUBLIC_DECLS` at
+    `:413` — over `extern "C" {` and `}` (`:399-400`).  Aro is given
+    `__GNUC__` when it emulates Clang or GCC
+    (`lib/compiler/aro/aro/Compilation.zig:269-274`), so that branch is the
+    one it reads.  The `#else` at `:417-424` is the plain-token spelling every
+    other family uses.
+  * **OpenBSD ILP32** — `arm-openbsd`, `powerpc-openbsd`, `x86-openbsd`.  Aro
+    ships its own `<stddef.h>` and reads it ahead of the target's, and that
+    file typedefs `size_t` as `__SIZE_TYPE__`
+    (`lib/compiler/aro/include/stddef.h:8`), while
+    `generic-openbsd/sys/types.h:171-174` typedefs the same name as `__size_t`
+    under a `_SIZE_T_DEFINED_` guard that Aro's header never sets.  At 32 bits
+    the two spellings are `unsigned int` and `unsigned long`; at 64 bits both
+    are `unsigned long` and the definitions agree, which is exactly why the
+    three ILP32 cells fail and the five 64-bit ones do not.
+  * **OpenBSD MIPS** — `mips64-openbsd`, `mips64el-openbsd`.
+    `generic-openbsd/mips64/endian.h:32-41` `#error`s unless `__MIPSEL__` or
+    `__MIPSEB__` is defined, and Aro's MIPS table gives all four MIPS
+    architectures `__mips__` and `_mips` and nothing else
+    (`lib/compiler/aro/aro/Compilation.zig:635-642`).
+  * **`x86-windows`.**  `any-windows-any/stdlib.h:717` includes `<malloc.h>`,
+    and `any-windows-any/malloc.h:183-187` derives `_ALLOCA_S_MARKER_SIZE`
+    from `_ARM_`, `_X86_`, `__ia64__`, `__x86_64` or `__aarch64__`;
+    `_MarkAllocaS` (`:191-197`), `_malloca` (`:206-211`) and `_FreeAllocaS`
+    (`:219-224`) then name it, and Aro emits `static __inline` bodies — its
+    own glibc translation of this aggregate carries 83 of them.  Aro's table
+    is readable and separates the cells: it gives `.x86_64` `__x86_64`
+    (`Compilation.zig:436-440`) and the two AArch64 members `__aarch64__`
+    (`:691-692`), which is why `x86_64-windows` and `aarch64-windows` are not
+    in the failing list, and it defines `_X86_` nowhere and `_ARM_` never for
+    the 32-bit Arm members (`:684-690`), which is why `x86-windows` is.
+* **Fix.**  `TranslationRoute`, `translationRoute` and `preprocessedAggregate`
+  in `build.zig` (`:1076-1323`), read once per target from
+  `addPublicModule`'s `.root_source_file` (`:1364-1370`).  `.aro` reads
+  `include/htscodecs_all.h` as it stands.  `.preprocessed` runs `zig cc -E
+  -dD -x c` over the same file first — the compiler running the build script,
+  the same `-target` when the target is not native, the same `c_flags`, the
+  same `-DHTSCODECS_WITH_BZ2=1` the translation already carried, and a
+  `-MD`/`-MF` depfile through `addPrefixedDepFileOutputArg` — and Aro parses
+  what it wrote.  Nothing is stubbed, narrowed or renamed, no `-I` is needed
+  because the aggregate resolves its own includes, and no macro of the
+  compiler's own is predefined: the front end in front is the compiler that
+  compiles the C core.  `-fsys=htscodecs` is excluded by construction and
+  keeps Aro.
+* **Rule.**  An aggregate header's portability is bounded by the front end
+  reading it, and a bundled front end is not evidence about a foreign libc.
+  When the two disagree, put the target's own preprocessor in front of the
+  parser and hand the parser its output — do not define the macro the missing
+  predefine would have supplied, because that macro is a statement about what
+  the target is.  State the condition as the property the cause turns on (an
+  OS tag, a pointer width, an arch member), never as the list of triples that
+  happened to fail, so the next architecture of the family is covered instead
+  of silently left behind.  And keep the macro set on the preprocessing line
+  identical to the compile line's, or the archive and the translated
+  interface describe two different builds.
+* **Targets bound.**  Any Zig 0.16 target on NetBSD; on OpenBSD with a pointer
+  width other than 64 or an architecture of `.mips64`/`.mips64el`; and on
+  32-bit x86 Windows.  Everything else in this matrix keeps Aro.  The Windows
+  clause is `.x86` rather than "32-bit Windows" on purpose: `.x86` is the cell
+  that was observed failing, and 32-bit Arm Windows is not a cell this package
+  builds at all, so widening it there would be a change with no observation
+  behind it.  The Aro table says such a cell would fail the same way, and the
+  clause is where that is corrected if one ever reaches this aggregate.
+* **Verification.**  `PENDING-VERIFICATION`.  The fifteen failures above are
+  the parent's observations of the tree *before* these edits, and nothing has
+  been run since.  Note first what cannot be run: `zig build check` reaches
+  none of the fifteen.  `-Dcheck-targets` accepts only the six names in
+  `matrix` and the three in `extra_matrix`
+  (`build.zig:410-457`), every one of them already on the `.aro` route, and
+  widening either table would change the published six-target baseline that
+  §6 of `AGENTS.md` fixes — so that is a contract question, not a debugging
+  move, and it is not taken here.  `zig build test -Dtarget=<cell>` does
+  build the translation, but it also *runs* the test binaries and needs the
+  foreign runner.  So the gates are:
+  * `zig build check -j8 --summary all` over the default six targets — proves
+    the `.aro` route is untouched for every cell that was already green, and
+    in particular that `x86_64-windows-gnu` and `aarch64-macos-none` still
+    translate with no extra front end.
+  * `cross-test` from the package root, `zig-build` profile — the full
+    53-platform matrix, and the only gate that reaches all fifteen.  Its
+    per-target logs name the extra front end `preprocess htscodecs_all.h
+    <triple>`, so a cell that took Aro and a cell that took the new front end
+    are distinguishable in the summary rather than merely both green.
+
+## 39. An architecture family with two members is one test, not two
+
+* **Evidence.**  Zig 0.16 gives big-endian AArch64 its own
+  `std.Target.Cpu.Arch` member: `aarch64` at `lib/std/Target.zig:1327` and
+  `aarch64_be` at `:1328`, the same way it splits `.thumb`/`.thumbeb`
+  (`:1374`-`:1375`) and `.mips64`/`.mips64el` (`:1352`-`:1353`), and it folds
+  such a pair back into one member only where endianness makes no difference
+  to what is generated (`:1444`, `:3671`).  The kernel gate read
+  `target.result.cpu.arch != kernel.arch` with `kernel.arch == .aarch64`, so
+  on `.aarch64_be` it omitted the object.  Clang defines `__ARM_NEON` and
+  `__aarch64__` for both members, and Aro's table agrees
+  (`lib/compiler/aro/aro/Compilation.zig:691-692`, `:734-736`), so on the
+  big-endian cell both halves still compiled: the kernel body at
+  `rANS_static32x16pr_neon.c:35` and the scalar dispatcher's Neon half at
+  `rANS_static4x16pr.c:1072`, which returns `rans_compress_O0_32x16_neon`,
+  `rans_compress_O1_32x16_neon`, `rans_uncompress_O0_32x16_neon` and
+  `rans_uncompress_O1_32x16_neon` at `:1112-1113` and `:1135-1136`.  Observed
+  in the parent's 53-platform run on the `aarch64_be-linux` cell: the
+  dispatcher referenced all four and the archive did not have them.
+* **Cause.**  An enum that means "this ISA" where the graph meant "this ISA
+  family".  `__aarch64__` is defined by both members and says nothing about
+  endianness, so a guard written against it has two targets in front of it and
+  a one-member test answers only one.  The failure is a link error naming four
+  undefined symbols, and it appears on the *big-endian* cell only, which is
+  the cell nobody runs by hand.
+* **Fix.**  `SimdKernel.arch` becomes `SimdKernel.archs: []const
+  std.Target.Cpu.Arch` (`build.zig:194-200`), the Neon entry lists
+  `.aarch64` and `.aarch64_be` (`:237-240`), and one predicate
+  `targetBuildsKernel` (`:261-266`) is the only thing that reads it.  The
+  three x86 kernels keep the single member `.x86_64`, which is the whole
+  family.  Both existing callers use it — `addCoreLibrary` (`:854`) and
+  `addWin32ModuleDefinition` (`:914`) — so an export table and an object
+  closure still cannot disagree about which kernels exist.  The kernel's own
+  `<arm_neon.h>` (`rANS_static32x16pr_neon.c:36`) is a compiler builtin header
+  at `lib/include/arm_neon.h`, not a per-endianness one, so it resolves for
+  the new member exactly as for the old one.
+* **Rule.**  When a source guard is the specification of *which targets* a
+  translation unit belongs to, the build graph's selection must be the same
+  specification, member for member.  Write the family, not the enum value
+  that happens to be first, and say which preprocessor macros the family
+  turns on — `__aarch64__` here, `__x86_64__` for the three x86 kernels.  And
+  keep one predicate behind every caller, so adding a member cannot fix the
+  archive while leaving the Windows export list behind.
+* **Targets bound.**  Any target whose `std.Target.Cpu.Arch` is `.aarch64_be`;
+  in this matrix, `aarch64_be-linux` and `aarch64_be-netbsd`.  `.armeb` and
+  `.thumbeb` are deliberately *not* members: neither defines `__aarch64__`, so
+  the kernel takes its own `#else`
+  (`rANS_static32x16pr_neon.c:1973-1975`) and the dispatcher takes the scalar
+  `#else` (`rANS_static4x16pr.c:1148`), which hard-codes the scalar 32x16
+  pointers and calls nothing.  No kernel is added or removed for any other
+  target, and no target loses an object.
+* **Verification.**  `PENDING-VERIFICATION`.  The `aarch64_be-linux`
+  observation above is the parent's, of the tree before this edit.  The runs
+  that would move this:
+  * `zig build -Dtarget=aarch64_be-linux-gnu -j8 --summary all` — the cell
+    that failed, and the only cell this change newly compiles an object for.
+    `build` is the right step, not `test`: the archive, the translation and
+    `bin/htscodecs-demo` are all installed, and the demo's link is where the
+    four undefined names used to be reported.  `test` would additionally
+    *run* foreign binaries and needs the runner `cross-test` supplies.
+  * `zig build check` over the default six-target matrix — proves the
+    `.aarch64` and `.x86_64` cells are unaffected and that the default
+    `aarch64-linux-gnu` row still builds the same archive.
+  * `zig build check-shared -Dcheck-targets=x86_64-windows-gnu` — exercises
+    the second caller of the predicate, the generated `.def`, on the one
+    target whose export table it feeds.
+
+## 40. Big-endian 32-bit Arm is a native boundary, not a hole in the build graph
+
+* **Evidence.**  Observed in the parent's 53-platform run, on the
+  `thumbeb-linux` cell and not re-run here: the cell builds and links, and
+  what it reports is a mismatch in the codec's own output.  It is not one of
+  the fifteen translation failures of entry 38 and not the link failure of
+  entry 39.  Source-wise it is expected to build: `thumbeb` does not define
+  `__aarch64__`, so `rANS_static4x16pr.c:1072`'s `#elif` is not taken, its
+  scalar `#else` at `:1148` hard-codes the scalar 32x16 pointers, and the
+  Neon kernel is not part of that cell's closure — which is why
+  `SimdKernel.archs` lists no `.thumbeb`.
+* **Cause.**  Not established, and deliberately not guessed here.  What the
+  source shows is a boundary rather than a build defect: the output format is
+  byte-defined, `htscodecs/htscodecs_endian.h:78-88` claims big-endian
+  support for `__THUMBEB__` among others, and upstream's autotools build has
+  never been exercised on this target by anything in this repository.
+* **Fix.**  None, here.  No `.c` and no `.h` upstream file is touched: the
+  correction would be in upstream's big-endian 32-bit Arm codec path, it
+  needs its own reproduced failure and its own causal patch, and its own
+  integrity records.  No test is removed, skipped, relaxed or made
+  target-conditional, and no cell is dropped from any matrix.  The cell keeps
+  its name and reports what it is.
+* **Rule.**  A build graph's job ends where the algorithm begins.  When a
+  target compiles, links and then disagrees with the reference bytes, the
+  answer is a recorded platform boundary with the failing assertion named —
+  never a green cell produced by narrowing the test, and never a C edit made
+  to make a target's own output match itself.
+* **Targets bound.**  `thumbeb-linux` in this matrix.  `armeb-linux` and
+  `armeb-netbsd` share the same big-endian 32-bit Arm family and belong to
+  the same boundary; they are build-only cells here and are not claimed either
+  way.
+* **Verification.**  `OBSERVED` for the mismatch itself — the parent's run,
+  against this tree, which this change does not touch on that cell — and
+  nothing else is claimed.  The `cross-test` row for `thumbeb-linux` remains
+  a reported boundary after this change; it is not expected to turn green
+  and must not be recorded as one.
+
+## 41. A task body inherits the caller's directory, and a scratch project is not the source
+
+* **Evidence.**  Observed on 2026-10-04 in the parent's Nix acceptance run for
+  this SDK, and not re-run here.  Both devenv gates failed before reaching a
+  build: `sdk:provenance` printed `error: no build.zig file found, in the
+  current directory or any parent directories`, and `consumer:run` printed
+  `cd: consumer: No such file or directory`.  Both bodies were correct as
+  written; what was missing is a statement of *where* they run.
+* **Cause.**  devenv materialises a task as a generated program and runs it
+  with the caller's working directory.  The canonical entry is
+  `devenv --from path:<this SDK>`, which hands that program the project
+  directory beside the tree — a directory the caller chose, holding
+  `devenv.lock` and `.devenv/` and none of `build.zig`, `consumer/` or the
+  provenance records.  `$DEVENV_ROOT` names that project, so trusting it is
+  what a task that reads `$PWD` or `$DEVENV_ROOT` would do, and it is wrong
+  for exactly this reason.  The second half of the same mistake is quieter: a
+  body that ran in the right place but let `zig build` take its own defaults
+  would write `.zig-cache/` and, on any install step, `zig-out/` into a working
+  tree whose digests the driver compares before and after a run.
+* **Fix.**  One binding, used as the first line of every body:
+  `sdkRoot = builtins.toString ./.`, rendered through `lib.escapeShellArg` and
+  entered as `cd <root> || exit 1`.  Both halves of that expression are
+  load-bearing.  `./.` resolves against the file that writes it, so the root is
+  this SDK whatever directory the caller stood in; and `builtins.toString`
+  rather than an interpolated `${./.}` is what keeps the path this working
+  tree, because the interpolated form asks Nix for a store copy of this whole
+  tree — read-only, and not the tree `build.zig` and the digests describe.
+  The caches are then resolved by the body itself rather than by
+  `enterShell`, because `devenv tasks run --mode single` does not run the shell
+  hook: whatever the caller exported for `ZIG_LOCAL_CACHE_DIR` and
+  `ZIG_GLOBAL_CACHE_DIR` wins and is never overwritten, a missing one comes from
+  `$XDG_CACHE_HOME` and then from `$TMPDIR`, and with neither set the body names
+  what is missing and exits before it reaches the compiler — `/tmp`, `/var/tmp`,
+  a store path and this checkout are all refused.  Every body then carries
+  `-j8`, an explicit `--cache-dir` and `--summary all`, and `--prefix` on the
+  two routes that install (`sdk:build` and `consumer:run`) and on no other.
+* **Rule.**  A task that names a file must first name the directory that file
+  is in.  The directory is a property of the module that declares the task,
+  read from the module, never inherited from the caller and never reconstructed
+  from a project variable — and a build tool's own relative defaults
+  (`--cache-dir .zig-cache`, `--prefix zig-out`) are the same class of
+  assumption, resolved the same way.
+* **Verification.**  `PENDING-VERIFICATION`.  No task, script or gate in this
+  SDK has been run since these edits.  The two failures above are the parent's
+  observations of the tree before them, and a devenv entry for this SDK after
+  the configuration freeze is what would replace them.
+
+## 42. Packed bits cannot establish the caller's original unpacked size
+
+* **Condition.** `pack.unpackTo` receives packed bytes, a symbol count, a
+  map and a caller-sized destination, but no original unpacked-size field.
+* **Symptom.** Its old doc promised `InvalidArgument` for a destination that
+  was not the exact original size, although the wrapper inspected no such
+  field. The review's further claim that `nsym == 0` returns NULL for a
+  wrong size is refuted by `htscodecs/pack.c:335-337`: that branch fills the
+  caller's requested length and returns the destination.
+* **Fix.** State the exact-size caller obligation without inventing a
+  validator. The native packed-input length checks for `nsym` 8, 4 and 2
+  (`htscodecs/pack.c:235-236`, `:269-270`, `:311-312`) can return NULL, and
+  that remains `OperationFailed`. Preserve the existing `nsym == 1`
+  copy-capacity check and its `BufferTooSmall` result.
+* **Targets bound.** Every target and optimization mode; linked and loaded
+  dispatch share the same facade and native size semantics.
+* **Verification.** `SOURCE-CONFIRMED` native branches. On 2026-10-04 the
+  parent's corrected native linked Debug fixture observed `nsym == 8`
+  with 128 packed bytes: exact capacity 1024 wrote 1024 matching bytes;
+  capacity 4096 returned `OperationFailed`. Receipt:
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/after/hts-pack-corrected-after-debug/aggregate.json`.
+  This is `OBSERVED` for those two cases. ReleaseSafe observed the same
+  results from the already-compiled artifact after the parent established
+  identical executable SDK inputs and probe files. Receipt:
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/after/hts-pack-safe-artifact-reuse/aggregate.json`.
+  Its `ARTIFACT_REUSED` classification does not upgrade the earlier setup
+  failure: that full-closure check saw four changed documentation files,
+  not executable changes. Loaded dispatch, other alphabets and cross-target
+  behavior are not claimed. No worker gate ran.
+
+## 43. An advertised preset maximum is not the native table's upper bound
+
+* **Condition.** `fqzcomp.compress` passes a signed strategy to the native
+  parameter search.
+* **Symptom.** `htscodecs/fqzcomp_qual.c:770-783` indexes a five-row table
+  (`:195-203`), while `:751` clamps only indices at least 5. A negative
+  index is not checked. `FQZ_MAX_STRAT` is 3
+  (`htscodecs/fqzcomp_qual.h:50`), not the table's last index.
+* **Fix.** The prose distinguishes the advertised presets from the custom
+  row at 4. An ordinary `strat < 0` comparison now returns
+  `InvalidArgument` before the native call; the native upper clamp remains.
+* **Targets bound.** All targets and optimization modes, linked and loaded.
+* **Verification.** The parent observed the Debug before probe aborting on
+  native index -1 at `fqzcomp_qual.c:770`. Receipt:
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/before/hts-native-boundaries-before-3/fqz-strat-negative/result.json`.
+* **After observation, 2026-10-04.** The parent's native static-linked
+  consumer (`-Druntime=false`) compiled with exit 0 in Debug and
+  ReleaseSafe. In both modes, strategy -1 returned `InvalidArgument`;
+  strategies 0, 1 and 5 each compressed and decompressed to all 68
+  original bytes, including the retained upper-clamp path at strategy 5.
+  Aggregate receipts:
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/after/hts-guards-after-debug-20261004/aggregate.json`
+  and
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/after/hts-guards-after-safe-20261004/aggregate.json`.
+  This is `OBSERVED` focused behavior. The parent also observed the native
+  linked SDK suites exit 0 in Debug and ReleaseSafe on 2026-10-04: 44/44
+  tests in each, including both new edge regressions (changelog entry 21).
+  The later eight-cell native linked matrix also executed all 44 tests
+  without skips in all four optimization modes and both linkages, with
+  smoke/install success; changelog entry 21 cites exact per-cell receipts.
+  Loaded dispatch and cross targets remain pending. The complete focused
+  probe drivers exited 1 on invalid scratch pack-fixture rows, not these
+  fqz cases. No worker gate ran.
+
+## 44. Narrow a native record count before adding sentinel capacity
+
+* **Condition.** `qualStats` requires one extra `len` and `flags` entry and
+  narrows `num_records` to the native `int`.
+* **Symptom.** The old capacity comparison added 1 before narrowing.
+  At `maxInt(usize)` that addition overflowed before the intended
+  `LengthOverflow` refusal in the parent's Debug before probe.
+* **Fix.** Narrow before the capacity comparison and reuse its result in
+  `fqz_slice`. Keep the extra entries: the native selector-filter paths
+  read `flags[rec]` and `len[rec]` before the record-bound comparison
+  (`htscodecs/fqzcomp_qual.c:434-436`, `:533-534`). Their contents are passed
+  through unchanged, not synthesized by the facade.
+* **Targets bound.** All targets and optimization modes, linked and loaded.
+* **Verification.** The parent observed the Debug before probe aborting on
+  the sentinel-capacity addition in the facade. Receipt:
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/before/hts-native-boundaries-before-3/qual-stats-max-records/result.json`.
+* **After observation, 2026-10-04.** The parent's native static-linked
+  consumer (`-Druntime=false`) compiled with exit 0 in Debug and
+  ReleaseSafe; `qual-stats-max-records` returned `LengthOverflow` in both.
+  Aggregate receipts:
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/after/hts-guards-after-debug-20261004/aggregate.json`
+  and
+  `/home/tmp2/gertullj/scratch/foundation-libs/text-contract-probes/htscodecs/epochs/after/hts-guards-after-safe-20261004/aggregate.json`.
+  This is `OBSERVED` for that boundary. The parent also observed the native
+  linked SDK suites exit 0 in Debug and ReleaseSafe on 2026-10-04: 44/44
+  tests in each, including both new edge regressions (changelog entry 21).
+  The later eight-cell native linked matrix also executed all 44 tests
+  without skips in all four optimization modes and both linkages, with
+  smoke/install success; changelog entry 21 cites exact per-cell receipts.
+  Loaded dispatch and cross targets remain pending. The complete focused
+  probe drivers exited 1 on invalid scratch pack-fixture rows, not this
+  case. No worker gate ran.

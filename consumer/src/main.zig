@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 //! Consumer of the htscodecs fork, through the public module only.
 //!
 //! Nothing in this file reaches into the fork's source tree, its generated
@@ -8,9 +9,21 @@
 //! Output is deterministic: the same payload, the same codecs, the same
 //! numbers on every run and every machine.  A failed assertion is a
 //! non-zero exit, so `zig build run` is a real check and not a demo.
+//!
+//! In a runtime-loading build (`-Druntime=true`) the fork's library is not
+//! linked into this executable at all, so the provider is named explicitly:
+//! `--provider <path>` on the command line or `HTSCODECS_PROVIDER` in the
+//! environment.  A run told neither says so and exits non-zero.  There is no
+//! default file, no search path and no fallback to a linked copy.
 
 const std = @import("std");
 const htscodecs = @import("htscodecs");
+
+/// What this program adds to what `load` can already say.
+const ConfigurationError = error{ NoProviderConfigured };
+
+/// The environment variable naming the provider file.
+const provider_variable = "HTSCODECS_PROVIDER";
 
 /// A fixed, compressible payload that resembles a quality-score block: a
 /// small alphabet over a long run, which is what CRAM actually stores.
@@ -36,6 +49,13 @@ pub fn main(init: std.process.Init) !void {
     const raw = try gpa.alloc(u8, 64 * 1024);
     defer gpa.free(raw);
     const payload = makePayload(raw);
+
+    // A linked build has the library in the executable and needs nothing.  A
+    // runtime-loading build has an empty table until a provider is named, and
+    // every check below would otherwise stop the program naming itself.
+    if (comptime htscodecs.runtime_loaded) {
+        try htscodecs.load(.{ .path = try providerRequest(init) });
+    }
     try out.print("htscodecs {s} via a real package dependency\n", .{htscodecs.versionText()});
 
     try checkRans4x8(out, payload);
@@ -48,6 +68,8 @@ pub fn main(init: std.process.Init) !void {
     try checkPack(out, gpa);
     try checkErrors(out);
     try checkRawC(out, gpa, payload);
+    try checkQualityStats(out, payload);
+    try checkProviderAllocator(out, payload);
 
     try out.print("\nall consumer assertions passed\n", .{});
 }
@@ -282,8 +304,29 @@ fn checkErrors(out: *std.Io.Writer) !void {
         if (err != htscodecs.Error.InvalidArgument) return error.UnexpectedError;
     }
 
+    // The run-length symbol count is the other pre-call refusal worth
+    // proving from a downstream package: upstream indexes a 256-byte
+    // array with the caller's own count and checks nothing, so the facade
+    // has to range-check it before C sees it, in both directions.
+    const rle_data: []const u8 = "abcdefgh";
+    var run = [_]u8{0} ** 8;
+    var encoded = [_]u8{0} ** 8;
+    var decoded = [_]u8{0} ** 8;
+    var syms = htscodecs.rle.Symbols{};
+    syms.count = 257;
+    if (htscodecs.rle.encode(rle_data, &run, &syms, &encoded)) |_| {
+        return error.BadSymbolCountAccepted;
+    } else |err| {
+        if (err != htscodecs.Error.InvalidArgument) return error.UnexpectedError;
+    }
+    if (htscodecs.rle.decode(&encoded, &run, &syms, &decoded)) |_| {
+        return error.BadSymbolCountAccepted;
+    } else |err| {
+        if (err != htscodecs.Error.InvalidArgument) return error.UnexpectedError;
+    }
+
     try out.print(
-        "  {s: <12}empty input -> error.OperationFailed, short map -> error.InvalidArgument\n",
+        "  {s: <12}empty input -> error.OperationFailed; short map and symbol count 257 -> error.InvalidArgument\n",
         .{"errors"},
     );
 }
@@ -325,4 +368,113 @@ fn checkRawC(out: *std.Io.Writer, gpa: std.mem.Allocator, payload: []const u8) !
     if (!std.mem.eql(u8, back[0..back_size], payload)) return error.RawRoundTripContentMismatch;
 
     try out.print("  {s: <12}raw C rans_compress_4x16 / rans_uncompress_4x16 round trip ok\n", .{"c module"});
+}
+
+/// The fqzcomp analysis utility, checked through its own result rather than
+/// against a fixture: the histogram it fills must account for every quality
+/// byte handed in, and the parameter block it fills must report the same
+/// number of distinct symbols the histogram shows.
+fn checkQualityStats(out: *std.Io.Writer, payload: []const u8) !void {
+    // `qualStats` reads `slice.flags[rec]` before it checks
+    // `rec < num_records`, so the facade requires one entry more than there
+    // are records.  The extra entry is never required to mean anything.
+    var lengths = [_]u32{ @intCast(payload.len), 0 };
+    var flags = [_]u32{ 0, 0 };
+    const slice = htscodecs.Slice{
+        .num_records = 1,
+        .len = &lengths,
+        .flags = &flags,
+    };
+
+    var params: htscodecs.c.fqz_param = std.mem.zeroes(htscodecs.c.fqz_param);
+    var histogram = [_]u32{0} ** 256;
+    try htscodecs.fqzcomp.qualStats(slice, payload, &params, &histogram, -1);
+
+    var counted: u64 = 0;
+    var distinct: c_int = 0;
+    for (histogram) |count| {
+        counted += count;
+        if (count != 0) distinct += 1;
+    }
+    if (counted != payload.len) return error.HistogramTotalMismatch;
+    if (params.nsym != distinct) return error.HistogramSymbolMismatch;
+    // `max_sym` is the highest symbol the histogram actually saw, so its bin
+    // is non-empty and every bin above it is not.
+    if (params.max_sym < 0 or params.max_sym > 255) return error.HistogramSymbolRange;
+    // `fqz_param.max_sym` is upstream's `int`, while a histogram bin is a
+    // Zig index, so the range check above is what makes this cast sound and
+    // the annotated type is what gives it a result type.
+    const max_sym: usize = @intCast(params.max_sym);
+    if (histogram[max_sym] == 0) return error.HistogramMaxSymbolEmpty;
+    for (histogram[max_sym + 1 ..]) |count| {
+        if (count != 0) return error.HistogramMaxSymbolNotHighest;
+    }
+
+    try out.print(
+        "  {s: <12}fqzcomp.qualStats accounted for {d} bytes as {d} distinct symbols, max {d}\n",
+        .{ "quality stats", counted, distinct, params.max_sym },
+    );
+}
+
+/// The provider's own allocation pool, used the way a caller is meant to use
+/// it: allocated from the pool, written by a codec, and released through the
+/// pool's own free rather than libc's.
+fn checkProviderAllocator(out: *std.Io.Writer, payload: []const u8) !void {
+    const bound = try htscodecs.rans4x16.compressBound(payload.len, 0);
+    const scratch = try htscodecs.tls.alloc(bound);
+    defer htscodecs.tls.free(scratch);
+
+    // The pool's contents are unspecified: a fresh block is zeroed and a
+    // reused one is not (`utils.c:141-162`), so what this writes and reads
+    // back is real memory rather than a non-null pointer, and the check
+    // below is that the round trip is byte-exact.
+    const n = try htscodecs.rans4x16.compressTo(payload, scratch[0..bound], 0);
+
+    const plain = try htscodecs.tls.alloc(payload.len);
+    defer htscodecs.tls.free(plain);
+    const m = try htscodecs.rans4x16.uncompressTo(scratch[0..n], plain[0..payload.len]);
+    if (m != payload.len) return error.PoolRoundTripLengthMismatch;
+    if (!std.mem.eql(u8, plain[0..m], payload)) return error.PoolRoundTripContentMismatch;
+
+    // A second block from the same pool must be a different allocation: the
+    // threaded pool is a cache of real blocks, not a bump allocator handing
+    // the same bytes out twice.
+    const second = try htscodecs.tls.alloc(bound);
+    defer htscodecs.tls.free(second);
+    if (second == scratch) return error.PoolReusedLiveBlock;
+
+    try out.print(
+        "  {s: <12}{d} bytes compressed into provider pool memory and back, released with htscodecs_tls_free\n",
+        .{ "pool", payload.len },
+    );
+}
+
+/// The provider this run should load, from `--provider <path>` or from
+/// `HTSCODECS_PROVIDER`.
+fn providerRequest(init: std.process.Init) ConfigurationError![]const u8 {
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch
+        return noProvider();
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--provider")) {
+            if (index + 1 >= args.len) return noProvider();
+            return args[index + 1];
+        }
+    }
+    return init.environ_map.get(provider_variable) orelse
+        return noProvider();
+}
+
+/// Say which variable is missing.  An error name on its own would send the
+/// next person into the loader instead of to their command line.
+fn noProvider() ConfigurationError {
+    std.debug.print(
+        "htscodecs consumer: this is a runtime-loading build, so nothing is " ++
+            "linked and every codec call needs a provider first.  Pass " ++
+            "--provider <path>, or export {s} with a shared object exporting " ++
+            "every entry point of the installed htscodecs headers.  Nothing is " ++
+            "loaded by default and no other file is tried.\n",
+        .{provider_variable},
+    );
+    return error.NoProviderConfigured;
 }

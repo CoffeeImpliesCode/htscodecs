@@ -20,6 +20,7 @@
 const std = @import("std");
 const htscodecs = @import("htscodecs");
 const fx = @import("fixtures");
+const provider = @import("provider.zig");
 
 const Error = htscodecs.Error;
 
@@ -38,6 +39,7 @@ const Decoder = enum {
 const q8_payload_bytes = fx.source.q8.len;
 
 test "empty input is rejected by every decoder with a framing length check" {
+    try provider.load();
     const empty: []const u8 = &.{};
 
     try std.testing.expectError(Error.OperationFailed, htscodecs.rans4x8.uncompress(empty));
@@ -47,6 +49,7 @@ test "empty input is rejected by every decoder with a framing length check" {
 }
 
 test "input shorter than the framing header is rejected" {
+    try provider.load();
     var scratch: [512]u8 = undefined;
 
     // rANS 4x8 and the tokeniser both require at least 9 bytes.
@@ -86,6 +89,7 @@ fn truncationReproduces(
 }
 
 test "truncating a checked-in stream never reproduces the original" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, q8_payload_bytes);
     defer std.testing.allocator.free(raw);
     const original = fx.qualityPayload(fx.source.q8, raw);
@@ -111,6 +115,7 @@ test "truncating a checked-in stream never reproduces the original" {
 }
 
 test "flipping one byte never reproduces the original" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, q8_payload_bytes);
     defer std.testing.allocator.free(raw);
     const original = fx.qualityPayload(fx.source.q8, raw);
@@ -163,6 +168,7 @@ test "flipping one byte never reproduces the original" {
 }
 
 test "an undersized destination is reported, not overrun" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, q8_payload_bytes);
     defer std.testing.allocator.free(raw);
     const original = fx.qualityPayload(fx.source.q8, raw);
@@ -185,6 +191,7 @@ test "an undersized destination is reported, not overrun" {
 }
 
 test "a zero-length destination is rejected before the codec runs" {
+    try provider.load();
     var none: [0]u8 = .{};
     try std.testing.expectError(
         Error.BufferTooSmall,
@@ -205,6 +212,7 @@ test "a zero-length destination is rejected before the codec runs" {
 }
 
 test "a damaged fqzcomp stream never reproduces the original" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, q8_payload_bytes);
     defer std.testing.allocator.free(raw);
     // A decoded fqzcomp block holds raw phred scores: upstream's driver
@@ -231,6 +239,7 @@ test "a damaged fqzcomp stream never reproduces the original" {
 }
 
 test "a damaged tokenised name block never reproduces the original" {
+    try provider.load();
     const original = fx.source.set_01_names;
     const stream = fx.tok3.set_01_names_5;
 

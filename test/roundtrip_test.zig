@@ -8,6 +8,7 @@
 const std = @import("std");
 const htscodecs = @import("htscodecs");
 const fx = @import("fixtures");
+const provider = @import("provider.zig");
 
 const flag = htscodecs.order_flag;
 const aflag = htscodecs.arith_order_flag;
@@ -36,6 +37,7 @@ const orders = [_]struct { name: []const u8, rans: c_int, arith: c_int }{
 const tiny = "abracadabra banana bandana";
 
 test "rANS 4x8 round trips order-0 and order-1" {
+    try provider.load();
     inline for (.{ 0, 1 }) |order| {
         const owned = try htscodecs.rans4x8.compress(tiny, order);
         defer owned.deinit();
@@ -46,6 +48,7 @@ test "rANS 4x8 round trips order-0 and order-1" {
 }
 
 test "rANS 4x8 treats any non-zero order as order-1" {
+    try provider.load();
     // rans_compress upstream is `return order ? O1 : O0;`, so order 2 is
     // not an error, it is order-1.  Pinning that keeps a caller from
     // assuming an out-of-range order is rejected.
@@ -57,6 +60,7 @@ test "rANS 4x8 treats any non-zero order as order-1" {
 }
 
 test "rANS 4x16 caller-buffer output is identical to the owned output" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, fx.source.q4.len);
     defer std.testing.allocator.free(raw);
     const payload = fx.qualityPayload(fx.source.q4, raw);
@@ -84,6 +88,7 @@ test "rANS 4x16 caller-buffer output is identical to the owned output" {
 }
 
 test "the 32x16 kernels round trip through caller buffers" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, fx.source.q8.len);
     defer std.testing.allocator.free(raw);
     const payload = fx.qualityPayload(fx.source.q8, raw);
@@ -110,6 +115,7 @@ test "the 32x16 kernels round trip through caller buffers" {
 }
 
 test "the 32x16 wrappers reject an order they do not implement" {
+    try provider.load();
     var scratch: [64]u8 = undefined;
     try std.testing.expectError(
         htscodecs.Error.InvalidArgument,
@@ -122,6 +128,7 @@ test "the 32x16 wrappers reject an order they do not implement" {
 }
 
 test "the arithmetic coder caller-buffer output is identical to the owned output" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, fx.source.qvar.len);
     defer std.testing.allocator.free(raw);
     const payload = fx.qualityPayload(fx.source.qvar, raw);
@@ -150,6 +157,7 @@ test "the arithmetic coder caller-buffer output is identical to the owned output
 }
 
 test "fqzcomp round trips a multi-record quality block" {
+    try provider.load();
     // Two records of different lengths, the second flagged second-in-pair,
     // which is the shape CRAM actually stores.  The length and flag arrays
     // are mutable because the codec rewrites both.
@@ -189,6 +197,7 @@ test "fqzcomp round trips a multi-record quality block" {
 }
 
 test "fqzcomp clamps record lengths that do not sum to the input" {
+    try provider.load();
     // The documented mutation, exercised directly.  One record is declared
     // far longer than the block; the codec must shorten it rather than
     // read past `in`.
@@ -216,6 +225,7 @@ test "fqzcomp clamps record lengths that do not sum to the input" {
 }
 
 test "fqzcomp gives a CRAM 3.1 flagged record back unchanged" {
+    try provider.load();
     // A 3.1 stream stores qualities in the opposite orientation, so the
     // codec reverses every flagged record of the caller's buffer before it
     // encodes it (`fqzcomp_qual.c:1087-1109`) and reverses it back before it
@@ -249,6 +259,7 @@ test "fqzcomp gives a CRAM 3.1 flagged record back unchanged" {
 }
 
 test "the read-name tokeniser round trips at several levels" {
+    try provider.load();
     const template = "@ERR174310.1 HSQ1008_141:5:1101:1454:3564/1\n" ++
         "@ERR174310.2 HSQ1008_141:5:1101:1485:3570/1\n" ++
         "@ERR174310.3 HSQ1008_141:5:1101:1407:3580/1\n";
@@ -278,6 +289,7 @@ test "the read-name tokeniser round trips at several levels" {
 }
 
 test "the tokeniser encodes only whole records and says where the rest starts" {
+    try provider.load();
     // A block cut mid-line still encodes.  Upstream encodes whole lines
     // only: its trie loop stops at the first byte it cannot find a
     // separator for (`tokenise_name3.c:1469-1481`), so `last_start` is the
@@ -307,6 +319,7 @@ test "the tokeniser encodes only whole records and says where the rest starts" {
 }
 
 test "run-length coding round trips and reports its symbol set" {
+    try provider.load();
     // Few distinct symbols and long runs, which is what the RLE method
     // exists for.
     var data: [4096]u8 = undefined;
@@ -334,6 +347,7 @@ test "run-length coding round trips and reports its symbol set" {
 }
 
 test "symbol packing round trips a four-symbol alphabet" {
+    try provider.load();
     var data: [1000]u8 = undefined;
     for (&data, 0..) |*byte, i| byte.* = "ACGT"[i % 4];
 
@@ -355,6 +369,7 @@ test "symbol packing round trips a four-symbol alphabet" {
 }
 
 test "a full 256-symbol alphabet fills the map without reaching the length field" {
+    try provider.load();
     // hts_pack writes the whole map before it checks the alphabet width,
     // and the 256th symbol's code lands on index 256 (pack.c:68).  With
     // a 256-byte map that byte is `meta_len`, so the sentinel below would
@@ -376,6 +391,7 @@ test "a full 256-symbol alphabet fills the map without reaching the length field
 }
 
 test "unpacking an unpacked stream into a short destination is refused" {
+    try provider.load();
     // `nsym == 1` means "not packed", which unpackMeta returns for an
     // alphabet wider than 16 symbols.  Upstream then memcpy's the whole
     // input into out and never looks at the destination length
@@ -397,6 +413,7 @@ test "unpacking an unpacked stream into a short destination is refused" {
 }
 
 test "a symbol map one byte short is refused before the C code touches it" {
+    try provider.load();
     // The length check on the public map slices is an ordinary runtime
     // comparison, not a debug assertion, so it holds in ReleaseFast too.
     //

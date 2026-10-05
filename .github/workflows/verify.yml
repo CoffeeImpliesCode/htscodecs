@@ -10,8 +10,19 @@
 #     arithmetic coder's bzip2 method compiled in
 #   * the example runs once and checks its own results
 #   * the consumer package builds and runs through b.dependency()
+#   * both linkages are delivered for real: a static archive and a shared
+#     object, the latter position independent across the scalar units *and*
+#     the independently compiled ISA kernels, carrying upstream's libtool
+#     ABI number in its SONAME and its usual .so symlinks
+#   * the installed closure is complete for a package -- headers, pkg-config,
+#     licence and provenance records -- and the two-translation-unit header
+#     proof still links against the *installed* include tree in both linkages
 #   * the facade, the tests and the example compile for the cross-target
-#     matrix without running anything
+#     matrix without running anything, in all four combinations: static or
+#     shared, linked or runtime-loaded
+#   * the runtime-loaded route is real and not a relabelled linked one: the
+#     tests and the consumer package run against an explicitly named provider
+#     path, with no fallback if that path is wrong
 #   * the licence and provenance records are present, the pinned upstream
 #     commit is still reachable in this clone's history, and no upstream C
 #     source, header, test, script or licence file has been edited
@@ -69,6 +80,114 @@ jobs:
       - name: bzip2 build
         run: zig build test -Dbz2=true --summary all
 
+      # The shared delivery is a second artifact class, not a relabelled
+      # archive: `-Dlinkage=dynamic` turns PIC on for every module, links a
+      # real .so, and installs the .so/.so.2 symlinks.  Building and testing
+      # it is the only way that shows the ISA kernel objects were compiled
+      # PIC too -- a non-PIC kernel links and then fails to load, which no
+      # static test can reach.
+      - name: Shared build
+        run: zig build -Dlinkage=dynamic --summary all
+
+      - name: Shared tests (ReleaseSafe)
+        run: zig build test -Dlinkage=dynamic -Doptimize=ReleaseSafe --summary all
+
+      # The two-translation-unit proof against the installed include tree,
+      # run for the shared object too: it is the only step that takes the
+      # address of the per-ISA 32x16 entry points and links them, so it
+      # proves the kernel objects really are in the shared library.
+      - name: Installed header proof (shared)
+        run: zig build headers-run -Dlinkage=dynamic --summary all
+
+      # What a package actually ships, named rather than assumed: a missing
+      # licence or a missing pkg-config file is otherwise invisible to every
+      # other step in this workflow.
+      - name: Installed closure
+        run: |
+          set -eu
+          rm -rf prefix
+          zig build install --prefix "$PWD/prefix" -Dlinkage=dynamic
+          test -f prefix/lib/libhtscodecs.so.2.0.12
+          test -L prefix/lib/libhtscodecs.so.2
+          test -L prefix/lib/libhtscodecs.so
+          test -f prefix/lib/pkgconfig/htscodecs.pc
+          test -f prefix/include/htscodecs/htscodecs_all.h
+          test -f prefix/include/htscodecs/htscodecs_config.h
+          test -f prefix/bin/htscodecs-demo
+          for f in LICENSE.md NOTICE.md UPSTREAM.md FORK-LICENSE.md; do
+            test -f "prefix/share/licenses/htscodecs/$f"
+          done
+          for f in README.md README.zig.md CHANGELOG.md FORK-NOTES.md; do
+            test -f "prefix/share/doc/htscodecs/$f"
+          done
+          # The SONAME is the whole point of the version number; a library
+          # named correctly but linked without one is not substitutable for
+          # a system libhtscodecs.
+          readelf -d prefix/lib/libhtscodecs.so.2.0.12 \
+            | grep -F '(SONAME)' \
+            | grep -F 'libhtscodecs.so.2'
+          # pkg-config has to agree with the graph that was just built.
+          PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" pkg-config --exists htscodecs
+          PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" \
+            pkg-config --libs --static htscodecs \
+            | grep -F -- '-lm'
+
+      - name: Static installed closure
+        run: |
+          set -eu
+          rm -rf prefix-static
+          zig build install --prefix "$PWD/prefix-static"
+          test -f prefix-static/lib/libhtscodecs.a
+          test -f prefix-static/lib/pkgconfig/htscodecs.pc
+          test -f prefix-static/share/licenses/htscodecs/LICENSE.md
+
+      # The optional dependency has to reach the link metadata as well: a
+      # -Dbz2=true archive whose .pc omits -lbz2 fails only at some
+      # consumer's link line, and nowhere in this repository.
+      - name: bzip2 installed closure
+        run: |
+          set -eu
+          rm -rf prefix-bz2
+          zig build install --prefix "$PWD/prefix-bz2" -Dbz2=true
+          test -f prefix-bz2/lib/libhtscodecs.a
+          PKG_CONFIG_PATH="$PWD/prefix-bz2/lib/pkgconfig" \
+            pkg-config --libs --static htscodecs \
+            | grep -F -- '-lbz2'
+
+      # The runtime route is a second facade shape, not a flag on the first:
+      # `-Druntime=true` replaces the facade's `c` with a dispatch generated
+      # from the same translation step's output and stops linking the native
+      # library into the facade.  The library is still built and installed -
+      # it is the provider the dispatch binds to - so the provider is
+      # installed here first and handed to the tests through
+      # HTSCODECS_PROVIDER, which test/provider.zig reads.  Without a
+      # provider those tests fail by design rather than passing quietly.
+      - name: Runtime build (shared provider)
+        run: |
+          set -eu
+          rm -rf prefix-rt
+          zig build install --prefix "$PWD/prefix-rt" -Dlinkage=dynamic -Druntime=true
+          test -f prefix-rt/lib/libhtscodecs.so.2.0.12
+
+      - name: Runtime tests
+        run: |
+          set -eu
+          zig build install --prefix "$PWD/prefix-rt" -Dlinkage=dynamic -Druntime=true
+          HTSCODECS_PROVIDER="$PWD/prefix-rt/lib/libhtscodecs.so.2.0.12" \
+            zig build test -Dlinkage=dynamic -Druntime=true --summary all
+
+      # The provider is the one the earlier steps installed at the repository
+      # root, named by path from here rather than rebuilt: `zig build install`
+      # run from consumer/ would install the *consumer*, not the fork it
+      # depends on.
+      - name: Runtime consumer package
+        working-directory: consumer
+        run: |
+          set -eu
+          test -f ../prefix-rt/lib/libhtscodecs.so.2.0.12
+          HTSCODECS_PROVIDER="$PWD/../prefix-rt/lib/libhtscodecs.so.2.0.12" \
+            zig build run -Dlinkage=dynamic -Druntime=true --summary all
+
   cross:
     name: cross-target check
     runs-on: ubuntu-latest
@@ -93,6 +212,69 @@ jobs:
       # must not decide it in advance.  See FORK-NOTES.md entry 11.
       - name: Check
         run: zig build check --summary all
+
+      # The same matrix against the shared graph.  It is a separate step and
+      # not part of `check` because the two are two graphs: this one turns
+      # PIC on for the scalar units and for every independently compiled ISA
+      # kernel, and it *links* a shared object per target rather than only
+      # emitting an archive.  On x86_64-windows-gnu it is also the only step
+      # that resolves the generated export definition against the kernels
+      # that target really builds.
+      #
+      # `wasm32-wasi` is in that matrix and is not built here.  Its OS has no
+      # dynamic linker -- `std.Target.DynamicLinker.kind` is `.none` for it --
+      # so there is no shared object it could carry, and `build.zig` makes
+      # that one row a named failing step carrying the reason rather than
+      # dropping the row or emitting a `.wasm` file nothing can load.  Both
+      # facade routes are walked, because the route is orthogonal to the
+      # linkage, so both runs below are *expected* to fail for exactly that
+      # reason, and the step after them requires the five rows that can carry
+      # a shared object to be real.  See FORK-NOTES.md entry 37.
+      - name: Check (shared)
+        run: |
+          set +e
+          set -uo pipefail
+          for route in linked runtime-loaded; do
+            case $route in
+              linked) flags="" ;;
+              runtime-loaded) flags="-Druntime=true" ;;
+            esac
+            log="$RUNNER_TEMP/check-shared-$route.log"
+            # shellcheck disable=SC2086
+            zig build check-shared $flags --summary all 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            for expected in \
+              'check-shared row wasm32-wasi' \
+              'std.Target.DynamicLinker.kind is .none for that OS' \
+              'This build does not substitute a different artefact' \
+              'build the static delivery for this target instead'; do
+              if ! grep -qF "$expected" "$log"; then
+                echo "$route: expected the shared-graph refusal to say: $expected"
+                exit 1
+              fi
+            done
+            if [ "$status" -eq 0 ]; then
+              echo "$route: check-shared exited 0, so no row was refused for want of a dynamic linker"
+              exit 1
+            fi
+          done
+
+      # The five rows that can carry a shared object, for both facade routes.
+      # Compile-only here as everywhere else in this job: nothing is run.
+      - name: Check (shared, hosted rows)
+        run: |
+          set -eu
+          hosts=x86_64-linux-gnu,aarch64-linux-gnu,aarch64-macos-none,x86_64-windows-gnu,riscv64-linux-gnu
+          zig build check-shared "-Dcheck-targets=$hosts" --summary all
+          zig build check-shared "-Dcheck-targets=$hosts" -Druntime=true --summary all
+
+      # The matrix again with the runtime-loaded facade.  Compile-only, so
+      # nothing is loaded and no provider is needed: what this step proves is
+      # that runtime/graph.zig's generator runs for every target, that the
+      # dispatch compiles against each target's own translation output, and
+      # that the facade no longer links the native library.
+      - name: Check (runtime-loaded)
+        run: zig build check -Druntime=true --summary all
 
   provenance:
     name: licence and provenance
@@ -129,6 +311,7 @@ jobs:
           test -f UPSTREAM.md
           test -f CHANGELOG.md
           test -f FORK-NOTES.md
+          test -f FORK-LICENSE.md
           grep -q 'b9fc194f772e45bb0a1f44b08cbf8697a1384bae' UPSTREAM.md
           grep -q 'b9fc194f772e45bb0a1f44b08cbf8697a1384bae' build.zig
           # The three upstream licence exceptions must each be named here:
@@ -137,12 +320,15 @@ jobs:
             grep -q "$f" NOTICE.md
           done
 
-      # No upstream C source or header may be edited.  .gitignore is the one
-      # file this fork appends to (CHANGELOG entry 8), so it is not in this
-      # list; the append is recorded in UPSTREAM.md and NOTICE.md rather than
-      # diffed byte for byte, because a gate that compares this fork's own
-      # bookkeeping with itself catches a reworded comment, not a lost
-      # upstream file.  Every other upstream path below stays checked.
+      # No upstream C source or header may be edited.  Two paths are named
+      # here that this fork does replace, and each is named for a stated
+      # reason rather than quietly dropped: `.gitignore` because this fork
+      # appends to it (CHANGELOG entry 8), and `README.md` because the fork
+      # README lives at that path -- upstream's own text is preserved
+      # verbatim at README.upstream.md and *that* is the path diffed here.
+      # A gate that compares this fork's own bookkeeping with itself catches
+      # a reworded comment, not a lost upstream file.  Every other upstream
+      # path below stays checked.
       - name: Upstream sources are unmodified
         run: |
           set -eu
@@ -152,7 +338,7 @@ jobs:
           fi
           changed=$(git diff --name-only b9fc194f772e45bb0a1f44b08cbf8697a1384bae -- \
             htscodecs tests javascript m4 \
-            configure.ac Makefile.am LICENSE.md NEWS.md README.md BENCHMARKS.md \
+            configure.ac Makefile.am LICENSE.md NEWS.md README.upstream.md BENCHMARKS.md \
             MAINTAINERS.md .gitattributes)
           if [ -n "$changed" ]; then
             echo "upstream files were modified:" >&2
@@ -171,6 +357,7 @@ jobs:
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
           tar --exclude=./.git --exclude=./.zig-cache --exclude=./zig-out \
+            --exclude=./zig-pkg --exclude='./prefix*' \
             -cf - . | tar -xf - -C "$tmp"
           cd "$tmp"
           zig build --summary all

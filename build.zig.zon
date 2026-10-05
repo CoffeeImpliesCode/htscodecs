@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// Native source terms remain in LICENSE.md and NOTICE.md.
 .{
     .name = .htscodecs,
     .version = "1.6.7",
@@ -21,16 +24,49 @@
         "include",
         "test",
         "examples",
-        "consumer",
+        "consumer/build.zig",
+        "consumer/build.zig.zon",
+        "consumer/src/main.zig",
+        // The runtime route.  Load-bearing, not optional: `-Druntime=true`
+        // makes build.zig import runtime/graph.zig, which reaches
+        // runtime/loader.zig, runtime/library.zig, runtime/generate.zig and
+        // runtime/sync.c.  A package archive missing this directory fails to
+        // *configure* for the runtime configuration, so it has to be named
+        // rather than left to a glob that happens to match it.
+        "runtime",
         "htscodecs",
         "tests",
         "LICENSE.md",
         "NEWS.md",
         "README.md",
+        "README.upstream.md",
         "README.zig.md",
         "UPSTREAM.md",
         "CHANGELOG.md",
         "NOTICE.md",
         "FORK-NOTES.md",
+        "FORK-LICENSE.md",
+        // The portable Nix package is consumed by flake.nix and by
+        // devenv.nix; a package archive that left any of them out would
+        // build a tree none of the documented entry points can use.
+        "package.nix",
+        "flake.nix",
+        "devenv.nix",
+        // The lock for the nixpkgs revision `flake.nix` pins.  It is a file
+        // in this tree, so a filtered package that left it out would ship a
+        // flake entry point that resolves its own input rather than using
+        // the resolution this tree was built and tested against.  Which
+        // revision that is was read out of this file, not assumed: naming a
+        // revision here would be a second statement of it that could go
+        // stale.  A Nix *derivation* is a different axis -- `package.nix`
+        // takes its dependencies as arguments and the flake frontend
+        // resolves the locked inputs before the build source filter runs --
+        // so nothing here says a derivation must carry this file.
+        // `devenv.yaml` says the matching lock "is written by the driver,
+        // not here", so no `devenv.lock` is named above: naming a path that
+        // is not in the tree is a package resolution failure, not a promise.
+        "flake.lock",
+        "devenv.yaml",
+        ".envrc",
     },
 }

@@ -13,6 +13,7 @@
 const std = @import("std");
 const htscodecs = @import("htscodecs");
 const fx = @import("fixtures");
+const provider = @import("provider.zig");
 
 /// Large enough to hold the column-stripped form of any quality corpus.
 /// `qualityPayload` never grows its output: every byte it writes came from
@@ -97,6 +98,7 @@ fn expectTok3(compressed: []const u8, want: []const u8) !void {
 // ---------------------------------------------------------------------------
 
 test "rANS 4x8 decodes every upstream order-0 and order-1 fixture" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, corpus_max);
     defer std.testing.allocator.free(raw);
 
@@ -119,6 +121,7 @@ test "rANS 4x8 decodes every upstream order-0 and order-1 fixture" {
 // ---------------------------------------------------------------------------
 
 test "rANS 4x16 decodes every upstream fixture, including X32, RLE, PACK and STRIPE orders" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, corpus_max);
     defer std.testing.allocator.free(raw);
 
@@ -171,6 +174,7 @@ test "rANS 4x16 decodes every upstream fixture, including X32, RLE, PACK and STR
 }
 
 test "rANS 4x16 decodes the SIMD stress fixture" {
+    try provider.load();
     // qsimd has neither tabs nor newlines, so the whole file is the payload,
     // which is what upstream's cut/tr pipeline yields for it too.
     const raw = try std.testing.allocator.alloc(u8, fx.source.qsimd.len);
@@ -183,6 +187,7 @@ test "rANS 4x16 decodes the SIMD stress fixture" {
 // ---------------------------------------------------------------------------
 
 test "the arithmetic coder decodes every upstream quality fixture" {
+    try provider.load();
     const raw = try std.testing.allocator.alloc(u8, corpus_max);
     defer std.testing.allocator.free(raw);
 
@@ -224,6 +229,7 @@ test "the arithmetic coder decodes every upstream quality fixture" {
 }
 
 test "the arithmetic coder decodes the whole-file u32 fixtures" {
+    try provider.load();
     // arith.test feeds the u32 corpus to the encoder with `cp`, not with
     // cut, so the oracle is the file itself.
     inline for (.{
@@ -236,6 +242,7 @@ test "the arithmetic coder decodes the whole-file u32 fixtures" {
 }
 
 test "the bzip2-backed arithmetic fixture is only decodable with -Dbz2=true" {
+    try provider.load();
     // tests/dat/arith/u32.4 has order byte 0x04, which is X_EXT: the block
     // was handed to libbz2 when the fixture was made.  The default build
     // compiles that method out, so decoding must fail rather than quietly
@@ -253,6 +260,7 @@ test "the bzip2-backed arithmetic fixture is only decodable with -Dbz2=true" {
 // ---------------------------------------------------------------------------
 
 test "fqzcomp decodes every upstream fixture at all four strategies" {
+    try provider.load();
     inline for (.{
         .{ fx.source.q4, fx.fqzcomp.q4_0 },
         .{ fx.source.q4, fx.fqzcomp.q4_1 },
@@ -286,6 +294,7 @@ test "fqzcomp decodes every upstream fixture at all four strategies" {
 // ---------------------------------------------------------------------------
 
 test "the tokeniser decodes every upstream fixture at every level" {
+    try provider.load();
     // One entry per file in tests/names/tok3: eleven name blocks at the
     // ten levels upstream ships (1, 3, 5, 7, 9 and the arithmetic-coder
     // levels 11 to 19).  A sample of them would leave most of the
