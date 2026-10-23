@@ -1,8 +1,4 @@
 # SPDX-License-Identifier: BSD-3-Clause
-#
-# devenv inputs for htscodecs.  Pinned, not floating: a shell that changes
-# because a branch moved is not a development environment.  The matching
-# lock file is written by the driver, not here.
 inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/c2f38fe7f9e04d9aadd354d380f2bd40531d9737

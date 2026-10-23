@@ -1,38 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Consumer of the htscodecs fork, through the public module only.
-//!
-//! Nothing in this file reaches into the fork's source tree, its generated
-//! headers or its test fixtures.  Everything below goes through
-//! `dep.module("htscodecs")` in build.zig, which is exactly what a
-//! downstream project would do.
-//!
-//! Output is deterministic: the same payload, the same codecs, the same
-//! numbers on every run and every machine.  A failed assertion is a
-//! non-zero exit, so `zig build run` is a real check and not a demo.
-//!
-//! In a runtime-loading build (`-Druntime=true`) the fork's library is not
-//! linked into this executable at all, so the provider is named explicitly:
-//! `--provider <path>` on the command line or `HTSCODECS_PROVIDER` in the
-//! environment.  A run told neither says so and exits non-zero.  There is no
-//! default file, no search path and no fallback to a linked copy.
+//! Exercises htscodecs through its public module as a downstream package.
+//! Runtime-loading builds require `--provider <path>` or `HTSCODECS_PROVIDER`.
+//! Checks use deterministic inputs and independently verify codec results.
 
 const std = @import("std");
 const htscodecs = @import("htscodecs");
 
-/// What this program adds to what `load` can already say.
 const ConfigurationError = error{ NoProviderConfigured };
 
-/// The environment variable naming the provider file.
 const provider_variable = "HTSCODECS_PROVIDER";
 
-/// A fixed, compressible payload that resembles a quality-score block: a
-/// small alphabet over a long run, which is what CRAM actually stores.
+/// Repeating, compressible payload approximating a CRAM quality block.
 fn makePayload(buf: []u8) []const u8 {
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     for (buf, 0..) |*byte, i| {
-        // A simple deterministic pattern with a short period plus a slow
-        // drift, so order-0, order-1 and the run-length method all have
-        // something to find.
+        // Deterministic pattern with a short period and slow drift.
         byte.* = alphabet[(i / 97 + i / 13) % alphabet.len];
     }
     return buf;
@@ -50,9 +32,6 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(raw);
     const payload = makePayload(raw);
 
-    // A linked build has the library in the executable and needs nothing.  A
-    // runtime-loading build has an empty table until a provider is named, and
-    // every check below would otherwise stop the program naming itself.
     if (comptime htscodecs.runtime_loaded) {
         try htscodecs.load(.{ .path = try providerRequest(init) });
     }
@@ -80,8 +59,7 @@ fn report(out: *std.Io.Writer, name: []const u8, payload: usize, encoded: usize)
     });
 }
 
-/// Encodes into a caller buffer and decodes back into another one, so the
-/// ownership path is entirely the caller's.
+/// Encodes and decodes through caller-owned buffers.
 fn roundTripCallerBuffers(
     out: *std.Io.Writer,
     gpa: std.mem.Allocator,
@@ -143,10 +121,7 @@ fn checkRans32x16(out: *std.Io.Writer, gpa: std.mem.Allocator, payload: []const 
     defer gpa.free(plain);
 
     for ([_]c_int{ 0, 1 }) |order| {
-        // The 32x16 kernels bound themselves per order and refuse a
-        // smaller destination, and the order-1 bound reserves the whole
-        // 256x256 order-1 frequency table, so one buffer cannot serve
-        // both.
+        // 32x16 bounds vary by order; order 1 needs a 256x256 destination.
         const bound = try htscodecs.rans4x16.compressBound(payload.len, order);
         const scratch = try gpa.alloc(u8, bound);
         defer gpa.free(scratch);
@@ -175,9 +150,7 @@ fn checkTok3(out: *std.Io.Writer, gpa: std.mem.Allocator) !void {
     const template = names[0..at];
 
     for ([_]c_int{ 1, 5, 9, 13, 19 }) |level| {
-        // encodeNames rewrites the separators to NUL in place, so the
-        // template has to be copied for each level.  That the copy is
-        // needed is the API's documented contract, not an accident here.
+        // `encodeNames` rewrites separators to NUL in place, so each level needs a copy.
         const block = try gpa.dupe(u8, template);
         defer gpa.free(block);
 
@@ -278,9 +251,7 @@ fn checkPack(out: *std.Io.Writer, gpa: std.mem.Allocator) !void {
 
 fn checkErrors(out: *std.Io.Writer) !void {
     const empty: []const u8 = &.{};
-    // The documented error surface, not a crash and not silent garbage.
-    // Upstream's NULL carries no reason, so the facade reports the neutral
-    // error.OperationFailed rather than guessing at a diagnosis.
+    // Upstream NULL has no reason; the facade reports neutral `OperationFailed`.
     if (htscodecs.rans4x8.uncompress(empty)) |owned| {
         owned.deinit();
         return error.EmptyInputAccepted;
@@ -294,8 +265,7 @@ fn checkErrors(out: *std.Io.Writer) !void {
         if (err != htscodecs.Error.OperationFailed) return error.UnexpectedError;
     }
 
-    // An argument the facade checks itself gets a specific name, and here
-    // it is a diagnostic error: a symbol map one byte too short.
+    // The facade diagnoses an undersized symbol map before calling upstream.
     var packed_meta = [_]u8{0} ** 256;
     const short_map = packed_meta[0 .. packed_meta.len - 1];
     if (htscodecs.pack.unpackMeta(&packed_meta, 1, short_map)) |_| {
@@ -304,10 +274,8 @@ fn checkErrors(out: *std.Io.Writer) !void {
         if (err != htscodecs.Error.InvalidArgument) return error.UnexpectedError;
     }
 
-    // The run-length symbol count is the other pre-call refusal worth
-    // proving from a downstream package: upstream indexes a 256-byte
-    // array with the caller's own count and checks nothing, so the facade
-    // has to range-check it before C sees it, in both directions.
+    // Upstream indexes a 256-byte array with this count and does not check it.
+    // The facade must reject out-of-range counts before either C call.
     const rle_data: []const u8 = "abcdefgh";
     var run = [_]u8{0} ** 8;
     var encoded = [_]u8{0} ** 8;
@@ -333,9 +301,6 @@ fn checkErrors(out: *std.Io.Writer) !void {
 
 fn checkRawC(out: *std.Io.Writer, gpa: std.mem.Allocator, payload: []const u8) !void {
     _ = gpa;
-    // The translated C interface is reachable directly, for anything the
-    // facade does not wrap.  This also proves the C artifact is linked into
-    // a plain downstream executable.
     const c = htscodecs.c;
     var out_size: c_uint = 0;
     const raw = c.rans_compress_4x16(
@@ -344,14 +309,10 @@ fn checkRawC(out: *std.Io.Writer, gpa: std.mem.Allocator, payload: []const u8) !
         &out_size,
         0,
     );
-    // A C declaration returning `unsigned char *` translates to a
-    // non-optional `[*c]u8`; widening it to an optional is how the NULL the
-    // C contract allows is asked about, and `orelse` on the C pointer
-    // itself would not type-check.
+    // Widen the translated C pointer so its permitted NULL result can be checked.
     const maybe_raw: ?[*c]u8 = raw;
     if (maybe_raw == null) return error.RawCompressFailed;
-    // Upstream malloced this; the package documents cFree as the matching
-    // release, and it is the same allocator either way.
+    // Release the provider-allocated buffer through the matching allocator.
     defer htscodecs.cFree(@ptrCast(maybe_raw));
 
     var back_size: c_uint = 0;
@@ -370,14 +331,9 @@ fn checkRawC(out: *std.Io.Writer, gpa: std.mem.Allocator, payload: []const u8) !
     try out.print("  {s: <12}raw C rans_compress_4x16 / rans_uncompress_4x16 round trip ok\n", .{"c module"});
 }
 
-/// The fqzcomp analysis utility, checked through its own result rather than
-/// against a fixture: the histogram it fills must account for every quality
-/// byte handed in, and the parameter block it fills must report the same
-/// number of distinct symbols the histogram shows.
+/// Checks input-byte totals and distinct-symbol counts from fqzcomp statistics.
 fn checkQualityStats(out: *std.Io.Writer, payload: []const u8) !void {
-    // `qualStats` reads `slice.flags[rec]` before it checks
-    // `rec < num_records`, so the facade requires one entry more than there
-    // are records.  The extra entry is never required to mean anything.
+    // Needs `num_records + 1` entries: upstream reads flags before checking bounds.
     var lengths = [_]u32{ @intCast(payload.len), 0 };
     var flags = [_]u32{ 0, 0 };
     const slice = htscodecs.Slice{
@@ -398,12 +354,9 @@ fn checkQualityStats(out: *std.Io.Writer, payload: []const u8) !void {
     }
     if (counted != payload.len) return error.HistogramTotalMismatch;
     if (params.nsym != distinct) return error.HistogramSymbolMismatch;
-    // `max_sym` is the highest symbol the histogram actually saw, so its bin
-    // is non-empty and every bin above it is not.
+    // The highest observed symbol has a nonempty bin; bins above it are empty.
     if (params.max_sym < 0 or params.max_sym > 255) return error.HistogramSymbolRange;
-    // `fqz_param.max_sym` is upstream's `int`, while a histogram bin is a
-    // Zig index, so the range check above is what makes this cast sound and
-    // the annotated type is what gives it a result type.
+    // Range-check upstream's `int` before converting it to a Zig index.
     const max_sym: usize = @intCast(params.max_sym);
     if (histogram[max_sym] == 0) return error.HistogramMaxSymbolEmpty;
     for (histogram[max_sym + 1 ..]) |count| {
@@ -416,18 +369,13 @@ fn checkQualityStats(out: *std.Io.Writer, payload: []const u8) !void {
     );
 }
 
-/// The provider's own allocation pool, used the way a caller is meant to use
-/// it: allocated from the pool, written by a codec, and released through the
-/// pool's own free rather than libc's.
+/// Exercises the provider's pool allocation, codec write, and pool-owned free.
 fn checkProviderAllocator(out: *std.Io.Writer, payload: []const u8) !void {
     const bound = try htscodecs.rans4x16.compressBound(payload.len, 0);
     const scratch = try htscodecs.tls.alloc(bound);
     defer htscodecs.tls.free(scratch);
 
-    // The pool's contents are unspecified: a fresh block is zeroed and a
-    // reused one is not (`utils.c:141-162`), so what this writes and reads
-    // back is real memory rather than a non-null pointer, and the check
-    // below is that the round trip is byte-exact.
+    // Pool blocks are zeroed or reused (`utils.c`), so verify writes by exact round trip.
     const n = try htscodecs.rans4x16.compressTo(payload, scratch[0..bound], 0);
 
     const plain = try htscodecs.tls.alloc(payload.len);
@@ -436,9 +384,6 @@ fn checkProviderAllocator(out: *std.Io.Writer, payload: []const u8) !void {
     if (m != payload.len) return error.PoolRoundTripLengthMismatch;
     if (!std.mem.eql(u8, plain[0..m], payload)) return error.PoolRoundTripContentMismatch;
 
-    // A second block from the same pool must be a different allocation: the
-    // threaded pool is a cache of real blocks, not a bump allocator handing
-    // the same bytes out twice.
     const second = try htscodecs.tls.alloc(bound);
     defer htscodecs.tls.free(second);
     if (second == scratch) return error.PoolReusedLiveBlock;
@@ -449,8 +394,6 @@ fn checkProviderAllocator(out: *std.Io.Writer, payload: []const u8) !void {
     );
 }
 
-/// The provider this run should load, from `--provider <path>` or from
-/// `HTSCODECS_PROVIDER`.
 fn providerRequest(init: std.process.Init) ConfigurationError![]const u8 {
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch
         return noProvider();
@@ -465,8 +408,6 @@ fn providerRequest(init: std.process.Init) ConfigurationError![]const u8 {
         return noProvider();
 }
 
-/// Say which variable is missing.  An error name on its own would send the
-/// next person into the loader instead of to their command line.
 fn noProvider() ConfigurationError {
     std.debug.print(
         "htscodecs consumer: this is a runtime-loading build, so nothing is " ++

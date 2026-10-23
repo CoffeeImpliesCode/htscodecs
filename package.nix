@@ -1,16 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
-#
-# htscodecs 1.6.7, built from source with Zig 0.16.0.
-#
-# One uncurried function, one derivation.  `linkage` selects the variant and
-# the entry points (flake.nix, devenv.nix) choose it.  Every installed path,
-# C flag and source list belongs to build.zig; this file only runs it.
-# See README.md and NOTICE.md.
 
 { lib, stdenv, zig, linkage ? "static", bzip2 ? null }:
 
-# `zig build` with no -Dtarget compiles for the machine running it, so a
-# cross derivation would silently produce the wrong architecture.
+# Zig defaults to the build host; reject cross derivations.
 assert stdenv.hostPlatform.system == stdenv.buildPlatform.system
   || builtins.throw
     "htscodecs: package.nix builds for the build platform only; a cross derivation would compile for the builder";
@@ -18,13 +10,10 @@ assert stdenv.hostPlatform.system == stdenv.buildPlatform.system
 let
   version = "1.6.7";
 
-  # Off unless a bzip2 package is passed.  Entry points pass `bzip2 = null`
-  # explicitly, because callPackage would otherwise fill it from the package
-  # set and turn the optional codec method on by accident.
+  # Explicit `null` prevents `callPackage` from enabling optional bzip2.
   withBzip2 = bzip2 != null;
 
-  # VCS, caches, and Nix/devenv/direnv state only.  Sources, headers, tests,
-  # fixtures, tools and licence records all stay.
+  # Exclude build and cache state; retain package sources and records.
   isState =
     name:
     name == ".git"
@@ -51,15 +40,13 @@ stdenv.mkDerivation {
   strictDeps = true;
 
   nativeBuildInputs = [ zig ];
-  # A static archive records no link flags of its own, so a bzip2 build has to
-  # publish the dependency to its consumers.
+  # A static archive cannot carry the optional bzip2 link dependency.
   propagatedBuildInputs = lib.optional withBzip2 bzip2.dev;
 
   dontConfigure = true;
   dontBuild = true;
   doCheck = false;
-  # Own the phases: the hook's install phase would append --release=safe and
-  # --prefix on its own.
+  # Own the install phase to avoid Zig hook defaults.
   dontUseZigConfigure = true;
   dontUseZigBuild = true;
   dontUseZigCheck = true;
@@ -102,8 +89,7 @@ stdenv.mkDerivation {
       Zig 0.16.0; nothing is downloaded and no installed copy is used.
     '';
     homepage = "https://github.com/samtools/htscodecs";
-    # BSD-3-Clause.  Three headers are public domain, two under a CC0 waiver:
-    # NOTICE.md carries the per-file inventory.
+    # Per-file licence exceptions are listed in `NOTICE.md`.
     license = lib.licenses.bsd3;
     licenseFile = "${placeholder "out"}/share/licenses/htscodecs/LICENSE.md";
     platforms = lib.platforms.unix;
