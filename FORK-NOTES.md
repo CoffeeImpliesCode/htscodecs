@@ -24,6 +24,7 @@ The upstream C implementation, installed headers, tests, scripts, licences, and 
 ## Build-graph deviations
 
 - `build.zig` replaces Autotools; it compiles upstream translation units directly and creates `config.h` and `version.h` in the build cache.
+- Zig 0.17 uses typed `@splat` initializers for repeated test arrays and concatenation for repeated strings in facade examples.
 - The aggregate header is translated for the selected target. Translation uses Aro directly where possible and `zig cc -E -dD` before Aro for NetBSD, OpenBSD, and x86 Windows target headers.
 - Each 32x16 ISA kernel is a separate object with its own feature flags. SSE4, AVX2, and AVX512 objects target x86-64; Neon targets AArch64, including big-endian AArch64. Runtime CPU detection selects available kernels.
 - `-Dbz2=true` enables the arithmetic coder's bzip2 method and requires libbz2 development files; it is off by default.

@@ -266,7 +266,7 @@ fn checkErrors(out: *std.Io.Writer) !void {
     }
 
     // The facade diagnoses an undersized symbol map before calling upstream.
-    var packed_meta = [_]u8{0} ** 256;
+    var packed_meta: [256]u8 = @splat(0);
     const short_map = packed_meta[0 .. packed_meta.len - 1];
     if (htscodecs.pack.unpackMeta(&packed_meta, 1, short_map)) |_| {
         return error.ShortMapAccepted;
@@ -277,9 +277,9 @@ fn checkErrors(out: *std.Io.Writer) !void {
     // Upstream indexes a 256-byte array with this count and does not check it.
     // The facade must reject out-of-range counts before either C call.
     const rle_data: []const u8 = "abcdefgh";
-    var run = [_]u8{0} ** 8;
-    var encoded = [_]u8{0} ** 8;
-    var decoded = [_]u8{0} ** 8;
+    var run: [8]u8 = @splat(0);
+    var encoded: [8]u8 = @splat(0);
+    var decoded: [8]u8 = @splat(0);
     var syms = htscodecs.rle.Symbols{};
     syms.count = 257;
     if (htscodecs.rle.encode(rle_data, &run, &syms, &encoded)) |_| {
@@ -343,7 +343,7 @@ fn checkQualityStats(out: *std.Io.Writer, payload: []const u8) !void {
     };
 
     var params: htscodecs.c.fqz_param = std.mem.zeroes(htscodecs.c.fqz_param);
-    var histogram = [_]u32{0} ** 256;
+    var histogram: [256]u32 = @splat(0);
     try htscodecs.fqzcomp.qualStats(slice, payload, &params, &histogram, -1);
 
     var counted: u64 = 0;

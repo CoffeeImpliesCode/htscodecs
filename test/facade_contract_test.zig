@@ -75,7 +75,7 @@ test "fqzcomp narrows the record count before adding sentinel capacity" {
     var lengths: [0]u32 = .{};
     var flags: [0]u32 = .{};
     var params = std.mem.zeroes(htscodecs.c.fqz_param);
-    var histogram = [_]u32{0} ** 256;
+    var histogram: [256]u32 = @splat(0);
     try std.testing.expectError(Error.LengthOverflow, htscodecs.fqzcomp.qualStats(
         .{ .num_records = std.math.maxInt(usize), .len = &lengths, .flags = &flags },
         &.{},
@@ -374,7 +374,7 @@ test "fqzcomp quality statistics account for every byte and name the symbols" {
     // The refusal happens before either out-parameter is read, so they can be
     // anything; real blocks keep the call honest about its signature.
     var spare_params: htscodecs.c.fqz_param = std.mem.zeroes(htscodecs.c.fqz_param);
-    var spare_histogram = [_]u32{0} ** 256;
+    var spare_histogram: [256]u32 = @splat(0);
     try std.testing.expectError(
         Error.InvalidArgument,
         htscodecs.fqzcomp.qualStats(short, payload, &spare_params, &spare_histogram, -1),
@@ -391,7 +391,7 @@ test "fqzcomp quality statistics account for every byte and name the symbols" {
     // `do_qa` is read before anything else (`fqzcomp_qual.c:481`), so the
     // parameter block has to be the caller's to initialise.
     var params: htscodecs.c.fqz_param = std.mem.zeroes(htscodecs.c.fqz_param);
-    var histogram = [_]u32{0} ** 256;
+    var histogram: [256]u32 = @splat(0);
     try htscodecs.fqzcomp.qualStats(slice, payload, &params, &histogram, -1);
 
     var counted: u64 = 0;

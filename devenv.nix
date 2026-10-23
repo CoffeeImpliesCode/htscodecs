@@ -62,7 +62,7 @@ let
 in
 {
   packages = [
-    pkgs.zig_0_16
+    pkgs.zig_0_17
     pkgs.pkg-config
     # bzip2 supplies both the runtime library and development headers.
     pkgs.bzip2
@@ -72,17 +72,17 @@ in
   # Keep outputs lazy and disable optional bzip2 unless requested.
   outputs = {
     static = pkgs.callPackage ./package.nix {
-      zig = pkgs.zig_0_16;
+      zig = pkgs.zig_0_17;
       linkage = "static";
       bzip2 = null;
     };
     shared = pkgs.callPackage ./package.nix {
-      zig = pkgs.zig_0_16;
+      zig = pkgs.zig_0_17;
       linkage = "dynamic";
       bzip2 = null;
     };
     default = pkgs.callPackage ./package.nix {
-      zig = pkgs.zig_0_16;
+      zig = pkgs.zig_0_17;
       bzip2 = null;
     };
   };

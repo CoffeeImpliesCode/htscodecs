@@ -59,7 +59,7 @@ const simd_kernels = [_]SimdKernel{
         .name = "avx512",
         .archs = &.{.x86_64},
         .source = "rANS_static32x16pr_avx512.c",
-        .features = &.{ .avx512f, .avx2, .evex512, .popcnt },
+        .features = &.{ .avx512f, .avx2, .popcnt },
         .exports = &.{
             "rans_compress_O0_32x16_avx512",
             "rans_uncompress_O0_32x16_avx512",
@@ -234,7 +234,7 @@ pub fn build(b: *std.Build) void {
             "which matches upstream's behaviour when libbz2 is not found.",
     ) orelse false;
     const linkage = b.option(
-        std.builtin.LinkMode,
+        std.lang.LinkMode,
         "linkage",
         "Link the C artifact as a static archive (the default, and this " ++
             "SDK's existing policy) or as a real shared library.  Ignored " ++
@@ -333,7 +333,7 @@ pub fn build(b: *std.Build) void {
     const smoke_run = b.addRunArtifact(run_demo);
     const smoke_step = b.step("smoke", "Run the example and print its deterministic output");
     smoke_step.dependOn(&smoke_run.step);
-    if (b.args) |args| smoke_run.addArgs(args);
+    smoke_run.addPassthruArgs();
 
     addInstalledHeaderProof(b, target, optimize, lib, header_installs);
 
@@ -415,10 +415,10 @@ fn splitsLibm(os_tag: std.Target.Os.Tag) bool {
 fn addCoreLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     generated: std.Build.LazyPath,
     bz2: bool,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
 ) *std.Build.Step.Compile {
     // Shared builds require PIC for scalar and ISA objects; static keeps the default.
     // Apply the same setting to separately compiled kernels.
@@ -463,7 +463,7 @@ fn addCoreLibrary(
         query.cpu_model = .baseline;
         query.cpu_features_add = .empty;
         query.cpu_features_sub = .empty;
-        for (kernel.features) |feature| query.cpu_features_add.addFeature(@intFromEnum(feature));
+        for (kernel.features) |feature| query.cpu_features_add.addFeature(@backingInt(feature));
         const object = b.addObject(.{
             .name = b.fmt("htscodecs_{s}", .{kernel.name}),
             .root_module = b.createModule(.{
@@ -572,7 +572,7 @@ fn installRecords(b: *std.Build) void {
 fn addSystemLibraryMode(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
     // Pair installed headers with the prebuilt library to preserve ABI.
     // Linkage and bzip2 options cannot configure it; runtime mode is rejected.
@@ -656,10 +656,10 @@ fn preprocessedAggregate(
     for (c_flags) |flag| run.addArg(flag);
     if (bz2) run.addArg("-DHTSCODECS_WITH_BZ2=1");
     run.addArg("-o");
-    const preprocessed = run.addOutputFileArg("htscodecs-translate.c");
+    const preprocessed = run.addOutputFileArg2("htscodecs-translate.c", .{});
     run.addArg("-MD");
-    _ = run.addPrefixedDepFileOutputArg("-MF", "htscodecs-translate.d");
-    run.addFileArg(b.path("include/htscodecs_all.h"));
+    _ = run.addDepFileOutputArg2("htscodecs-translate.d", .{ .prefix = "-MF" });
+    run.addFileArg2(b.path("include/htscodecs_all.h"), .{});
     return preprocessed;
 }
 
@@ -675,7 +675,7 @@ fn addPublicModule(
     /// Published module name, or `null` for a private second facade.
     name: ?[]const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     /// Native artifact, or `null` when linking the installed library.
     lib: ?*std.Build.Step.Compile,
     headers: HeaderSource,
@@ -807,7 +807,7 @@ fn needsBothLoaders(
 fn addFixturesModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("fixtures.zig"),
@@ -821,7 +821,7 @@ fn addDemo(
     b: *std.Build,
     name: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     facade: *std.Build.Module,
     fixtures: *std.Build.Module,
 ) *std.Build.Step.Compile {
@@ -844,7 +844,7 @@ fn testModule(
     b: *std.Build,
     path: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     published: *std.Build.Module,
     fixtures: *std.Build.Module,
 ) *std.Build.Module {
@@ -883,7 +883,7 @@ fn installHeaders(b: *std.Build) []const *std.Build.Step.InstallFile {
 fn addInstalledHeaderProof(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     lib: *std.Build.Step.Compile,
     header_installs: []const *std.Build.Step.InstallFile,
 ) void {
@@ -993,9 +993,7 @@ fn addInstalledHeaderProof(
     proof.root_module.addCSourceFile(.{ .file = tu_a, .flags = &c_flags });
     proof.root_module.addCSourceFile(.{ .file = tu_b, .flags = &c_flags });
     // Use only installed headers; source-tree includes would bypass this proof.
-    proof.root_module.addIncludePath(.{
-        .cwd_relative = b.getInstallPath(.header, ""),
-    });
+    proof.root_module.addIncludePath(.{ .relative = .{ .base = .install_include } });
     proof.root_module.linkLibrary(lib);
 
     // Depend only on installed headers, not the full install step.
@@ -1019,10 +1017,10 @@ fn addInstalledHeaderProof(
 
 fn addCrossCheck(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     generated: std.Build.LazyPath,
     bz2: bool,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
     runtime: bool,
     selected: ?[]const u8,
 ) void {
@@ -1108,10 +1106,10 @@ fn addOneCheckTarget(
     check_step: *std.Build.Step,
     name: []const u8,
     query: std.Target.Query,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     generated: std.Build.LazyPath,
     bz2: bool,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
     runtime: bool,
 ) void {
     const target = b.resolveTargetQuery(query);
@@ -1192,7 +1190,7 @@ fn addProvenanceGate(b: *std.Build) void {
     // Check required records under the build root; this gate works offline.
     const io = b.graph.io;
     for (required_records) |path| {
-        b.build_root.handle.access(io, path, .{}) catch |err| switch (err) {
+        b.root.access(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => gate.dependOn(&b.addFail(b.fmt(
                 "provenance: required file '{s}' is missing.  The BSD licence " ++
                     "text, the upstream provenance record and the aggregate " ++
@@ -1209,8 +1207,9 @@ fn addProvenanceGate(b: *std.Build) void {
 
     // Check pinned history separately so source archives without `.git` can build.
     // Run Git from the package root, not the process working directory.
+    const build_root = b.root.toString(b.allocator) catch @panic("OOM");
     const verify = b.addSystemCommand(&.{
-        "git",      "-C", b.build_root.path orelse ".",
+        "git",      "-C", build_root,
         "cat-file", "-e", upstream_commit ++ "^{commit}",
     });
     verify.expectExitCode(0);

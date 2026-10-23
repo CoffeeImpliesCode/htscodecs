@@ -1,5 +1,6 @@
 # Changelog
 
+- Port to Zig 0.17.0.
 - System-mode translation now includes the required standard types; target-aware preprocessing handles libc headers that Zig's C parser cannot parse, and AArch64 big-endian builds include the NEON kernel.
 - Reject negative FQZ strategies before native table access and guard `qualStats` record-count overflow; preserve upstream's custom-strategy clamp.
 - Clarify that `pack.unpackTo` cannot infer the original decoded size; single-symbol output reports bytes written and leaves the remaining destination untouched.

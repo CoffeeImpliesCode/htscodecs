@@ -397,7 +397,7 @@ test "unpacking an unpacked stream into a short destination is refused" {
     // input into out and never looks at the destination length
     // (pack.c:212-215), so the check has to happen here.
     const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    const map = [_]u8{0} ** 256;
+    const map: [256]u8 = @splat(0);
 
     var short: [4]u8 = undefined;
     try std.testing.expectError(

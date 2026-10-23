@@ -86,7 +86,7 @@ stdenv.mkDerivation {
       The custom CRAM codecs used for EXTERNAL block types: two rANS variants,
       a dynamic arithmetic coder, name and quality-score codecs derived from
       fqzcomp, run-length coding and symbol packing.  Built from source by
-      Zig 0.16.0; nothing is downloaded and no installed copy is used.
+      Zig 0.17.0; nothing is downloaded and no installed copy is used.
     '';
     homepage = "https://github.com/samtools/htscodecs";
     # Per-file licence exceptions are listed in `NOTICE.md`.

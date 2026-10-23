@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //!
-//! htscodecs: the CRAM external-block codecs, packaged for Zig 0.16.
+//! htscodecs: the CRAM external-block codecs, packaged for Zig 0.17.
 //!
 //! This package builds the unmodified upstream C library from source
 //! (rANS 4x8, rANS 4x16, the 32x16 SIMD kernels, the dynamic arithmetic
@@ -22,7 +22,9 @@
 //! const htscodecs = @import("htscodecs");
 //!
 //! pub fn main(init: std.process.Init) !void {
-//!     const payload = "the quick brown fox jumps over the lazy dog" ** 8;
+//!     const phrase = "the quick brown fox jumps over the lazy dog";
+//!     const twice = phrase ++ phrase;
+//!     const payload = twice ++ twice ++ twice ++ twice;
 //!     const bound = try htscodecs.rans4x16.compressBound(payload.len, 0);
 //!     const scratch = try init.gpa.alloc(u8, bound);
 //!     defer init.gpa.free(scratch);

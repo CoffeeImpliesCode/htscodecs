@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
 
     // Forward only explicit dependency options so each retains its own default.
     const linkage = b.option(
-        std.builtin.LinkMode,
+        std.lang.LinkMode,
         "linkage",
         "Forwarded to the htscodecs dependency: which artifact its build " ++
             "delivers and installs, the default static archive or a real " ++
@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const run_step = b.step("run", "Run the consumer and check its assertions");
     run_step.dependOn(&run.step);
 

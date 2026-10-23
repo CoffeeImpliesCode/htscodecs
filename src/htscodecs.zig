@@ -14,7 +14,9 @@
 //! ```zig
 //! const htscodecs = @import("htscodecs");
 //!
-//! const payload = "the quick brown fox jumps over the lazy dog" ** 8;
+//! const phrase = "the quick brown fox jumps over the lazy dog";
+//! const twice = phrase ++ phrase;
+//! const payload = twice ++ twice ++ twice ++ twice;
 //!
 //! // Caller buffers.  Nothing is allocated by the library on this path.
 //! const bound = try htscodecs.rans4x16.compressBound(payload.len, 0);

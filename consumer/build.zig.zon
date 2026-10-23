@@ -1,7 +1,7 @@
 .{
     .name = .htscodecs_consumer,
     .version = "0.0.1",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
 
     // Suggested by the pinned compiler for this package name.
     .fingerprint = 0xedf8509856ca3c03,

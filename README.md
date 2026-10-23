@@ -1,6 +1,6 @@
 # htscodecs for Zig
 
-A Zig 0.16.0 package for samtools/htscodecs v1.6.7.
+A Zig 0.17.0 package for samtools/htscodecs v1.6.7.
 It builds the upstream CRAM codecs and provides a Zig facade and C library.
 
 ## Source deviations from upstream
