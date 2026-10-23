@@ -6,7 +6,7 @@
 const std = @import("std");
 const htscodecs = @import("htscodecs");
 
-const ConfigurationError = error{ NoProviderConfigured };
+const ConfigurationError = error{NoProviderConfigured};
 
 const provider_variable = "HTSCODECS_PROVIDER";
 

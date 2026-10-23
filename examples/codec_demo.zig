@@ -28,7 +28,7 @@ const Method = struct {
 };
 
 /// What this program adds to what `load` can already say.
-const ConfigurationError = error{ NoProviderConfigured };
+const ConfigurationError = error{NoProviderConfigured};
 
 /// The environment variable naming the provider file.
 const provider_variable = "HTSCODECS_PROVIDER";

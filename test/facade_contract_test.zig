@@ -414,4 +414,3 @@ test "fqzcomp quality statistics account for every byte and name the symbols" {
         try std.testing.expectEqual(@as(u32, 0), count);
     }
 }
-
