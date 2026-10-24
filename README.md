@@ -58,15 +58,8 @@ compile-check targets are `aarch64-macos`, `x86_64-macos` and
 
 Add the package and import its module:
 
-```zig
-// build.zig.zon
-.dependencies = .{
-    .htscodecs = .{ .path = "../htscodecs" },
-},
-
-// build.zig
-const dep = b.dependency("htscodecs", .{ .target = target, .optimize = optimize });
-exe.root_module.addImport("htscodecs", dep.module("htscodecs"));
+```sh
+zig fetch --save git+https://github.com/CoffeeImpliesCode/htscodecs#v1.6.7
 ```
 
 The module and library artifact are both named `htscodecs`; the module already
